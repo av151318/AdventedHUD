@@ -121,6 +121,7 @@ def test_onboarding_write_without_atomic_uses_strict_ritual_meta(app, tmp_path, 
             assert body["status"] == "ritual_controlled"
             meta = body["data"]["mcp_meta"]
             assert meta["mode"] == "strict_ritual"
+            assert "You are inside the MCP" in meta["instruction"]
             assert "[MCP RITUAL MODE - STRICT PROCEDURE]" in meta["instruction"]
             assert "instruction" not in body["data"] or body["data"].get("instruction") is None
         finally:

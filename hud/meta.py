@@ -20,7 +20,10 @@ MCP_STRICT_RITUAL_SUFFIX = (
 
 def build_mcp_meta(*, strict_ritual: bool) -> Dict[str, str]:
     if strict_ritual:
-        return {"mode": "strict_ritual", "instruction": MCP_STRICT_RITUAL_SUFFIX}
+        return {
+            "mode": "strict_ritual",
+            "instruction": f"{MCP_EFFICIENCY_INSTRUCTION}\n\n{MCP_STRICT_RITUAL_SUFFIX}",
+        }
     return {"mode": "efficiency", "instruction": MCP_EFFICIENCY_INSTRUCTION}
 
 
