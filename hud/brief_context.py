@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Mapping, Optional
 
-from hud.gates import hud_require_post_onboarding_push_policy
 from hud.onboarding import hud_soul_md_extract_roles_and_goals
+from hud.onboarding_db import is_user_fully_onboarded, is_user_onboarding_atomic_complete
 from hud.store import HUDStore
 
 DECISION_MATRIX: Dict[str, Any] = {
@@ -116,19 +116,13 @@ def _first_non_empty_paragraph(section: str) -> str:
 
 def resolve_onboarding_state(store: HUDStore, user_id: str) -> str:
     try:
-        state = store.get_user_onboarding_state(user_id)
+        if is_user_fully_onboarded(store, user_id):
+            return "fully_onboarded"
+        if is_user_onboarding_atomic_complete(store, user_id):
+            return "awaiting_push_policy"
     except Exception:
         return "incomplete"
-    if not state or not state.get("role_ref") or not state.get("goal_ref"):
-        return "incomplete"
-    if hud_require_post_onboarding_push_policy():
-        try:
-            policy = store.get_user_push_policy(user_id)
-        except Exception:
-            return "awaiting_push_policy"
-        if policy is None:
-            return "awaiting_push_policy"
-    return "fully_onboarded"
+    return "incomplete"
 
 
 def build_push_policy_status(store: HUDStore, user_id: str) -> Dict[str, Any]:

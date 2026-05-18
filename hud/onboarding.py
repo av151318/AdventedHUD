@@ -27,6 +27,13 @@ from hud.gates import (
     hud_resolve_user_id,
 )
 from hud.meta import finalize_hud_data
+from hud.onboarding_db import (
+    hud_onboarding_db_status,
+    is_user_onboarding_atomic_complete,
+    is_user_fully_onboarded,
+    parse_atomic_from_payload,
+    validate_atomic_payload,
+)
 from hud.store import HUDStore
 
 logger = logging.getLogger(__name__)
@@ -117,7 +124,8 @@ def hud_soul_md_has_placeholder_content(content: str) -> bool:
     return bool(hud_soul_md_gate_issues(content))
 
 
-def hud_onboarding_context_status() -> Dict[str, Any]:
+def hud_soul_file_validation_status() -> Dict[str, Any]:
+    """File-only soul.md validation (supplementary; not used for tool gating)."""
     path = hud_soul_md_path()
     try:
         content = path.read_text(encoding="utf-8")
@@ -152,8 +160,29 @@ def hud_onboarding_context_status() -> Dict[str, Any]:
     return {"required": False, "source": None, "reasons": [], "details": {}}
 
 
-def hud_onboarding_context_complete() -> bool:
-    return not hud_onboarding_context_status()["required"]
+def hud_onboarding_context_status() -> Dict[str, Any]:
+    """Deprecated alias for file validation; gates use hud_onboarding_db_status."""
+    return hud_soul_file_validation_status()
+
+
+def hud_onboarding_context_complete(
+    store: Optional[HUDStore] = None, user_id: Optional[str] = None
+) -> bool:
+    if store is not None and user_id:
+        return is_user_fully_onboarded(store, user_id)
+    return not hud_soul_file_validation_status()["required"]
+
+
+def hud_onboarding_is_profile_edit(
+    store: HUDStore, user_id: str, payload: Mapping[str, Any]
+) -> bool:
+    if payload.get("profile_edit") is True:
+        return is_user_onboarding_atomic_complete(store, user_id)
+    return (
+        is_user_onboarding_atomic_complete(store, user_id)
+        and hud_onboarding_params_has_markdown(payload)
+        and not hud_onboarding_params_has_atomic(payload)
+    )
 
 
 def hud_onboarding_params_has_markdown(payload: Mapping[str, Any]) -> bool:
@@ -214,7 +243,7 @@ def hud_apply_user_onboarding_context(
     user_id: str,
 ) -> Dict[str, Any]:
     enriched = dict(payload)
-    onboarding_status = hud_onboarding_context_status()
+    onboarding_status = hud_onboarding_db_status(store, user_id)
     onboarding_needed = onboarding_status["required"]
     try:
         context = store.get_user_onboarding_state(user_id) if user_id else None
@@ -573,7 +602,8 @@ def hud_onboarding_soul_read_response(
             ),
             status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
         )
-    ctx = hud_onboarding_context_status()
+    uid = hud_resolve_user_id(request) if request is not None else "localuser"
+    ctx = hud_onboarding_db_status(store, uid)
     read_source = "worksheet" if worksheet_path != canonical_path else "canonical"
     canon_gate_issues: List[str] = []
     try:
@@ -583,7 +613,7 @@ def hud_onboarding_soul_read_response(
             )
     except (OSError, UnicodeDecodeError):
         canon_gate_issues = []
-    onboarding_required = bool(ctx.get("required"))
+    onboarding_required = not is_user_fully_onboarded(store, uid)
     data: Dict[str, Any] = {
         "path": str(worksheet_path),
         "canonical_path": str(canonical_path),
@@ -592,12 +622,11 @@ def hud_onboarding_soul_read_response(
         "byte_length": len(raw),
         "markdown": markdown,
         "onboarding_needed": onboarding_required,
-        "onboarding_complete": not onboarding_required,
-        "onboarding_gate_issues": canon_gate_issues,
+        "onboarding_complete": is_user_fully_onboarded(store, uid),
+        "soul_gate_issues": canon_gate_issues,
         "onboarding_needed_reason": ctx,
     }
-    uid = hud_resolve_user_id(request) if request is not None else "localuser"
-    if request is not None and not onboarding_required:
+    if request is not None and is_user_fully_onboarded(store, uid):
         data.update(hud_push_policy_client_fields(store, uid))
     data = finalize_hud_data(data, store=store, user_id=uid)
     return web.json_response(
@@ -646,20 +675,39 @@ def hud_onboarding_soul_build_response(
             ),
             status=500,
         )
-    ctx = hud_onboarding_context_status()
     try:
         written_body = written_path.read_text(encoding="utf-8")
     except OSError:
         written_body = ""
     gate_issues = hud_soul_md_gate_issues(written_body)
 
+    uid = hud_resolve_user_id(request, payload=payload) if request is not None else "localuser"
     if request is not None:
-        uid = hud_resolve_user_id(request, payload=payload)
         push_error = _apply_push_policy_from_payload(store, uid, payload)
         if push_error is not None:
             return push_error
 
-    uid = hud_resolve_user_id(request, payload=payload) if request is not None else "localuser"
+    db_status = hud_onboarding_db_status(store, uid)
+    onboarding_required = bool(db_status.get("required"))
+
+    if hud_onboarding_is_profile_edit(store, uid, payload):
+        data: Dict[str, Any] = {
+            "path": str(written_path),
+            "profile_edit": True,
+            "onboarding_needed": onboarding_required,
+            "onboarding_complete": is_user_fully_onboarded(store, uid),
+            "onboarding_needed_reason": db_status,
+        }
+        if gate_issues:
+            data["soul_validation_warnings"] = gate_issues
+        if not onboarding_required:
+            data.update(hud_push_policy_client_fields(store, uid))
+        data = finalize_hud_data(data, store=store, user_id=uid, strict_ritual=False)
+        return web.json_response(
+            hud_success_payload(route, status="ok", actor=actor, route_meta=route_meta, data=data),
+            status=200,
+        )
+
     has_atomic = hud_onboarding_params_has_atomic(payload)
     if not has_atomic:
         data = finalize_hud_data(
@@ -669,9 +717,11 @@ def hud_onboarding_soul_build_response(
                     "goals_by_role": {
                         "role_slug": [{"goal": "...", "done_definition": "..."}]
                     },
+                    "primary_role_ref": "...",
+                    "primary_goal_ref": "...",
                 },
                 "soul_markdown": written_body,
-                "onboarding_gate_issues": gate_issues,
+                "soul_gate_issues": gate_issues,
                 "next_action": "provide_atomic_rewrite",
             },
             store=store,
@@ -685,45 +735,73 @@ def hud_onboarding_soul_build_response(
             status=200,
         )
 
-    populated_from_agent = False
-    if not gate_issues and request is not None:
-        uid = hud_resolve_user_id(request, payload=payload)
-        atomic_refs = hud_onboarding_parse_atomic_refs(payload)
-        role_ref = atomic_refs.get("role_ref")
-        goal_ref = atomic_refs.get("goal_ref")
-        if not role_ref or not goal_ref:
-            extracted = hud_extract_first_role_goal_from_soul(written_body)
-            role_ref = role_ref or extracted.get("role_ref")
-            goal_ref = goal_ref or extracted.get("goal_ref")
-        if uid and role_ref:
-            try:
-                store.set_user_onboarding_state(
-                    uid,
-                    role_ref=role_ref,
-                    goal_ref=goal_ref,
-                    requires_approval=hud_extract_default_requires_approval(payload),
-                )
-                populated_from_agent = bool(
-                    atomic_refs.get("role_ref") and atomic_refs.get("goal_ref")
-                )
-            except Exception:
-                logger.exception("HUD failure populating onboarding state DB after soul write")
+    atomic = parse_atomic_from_payload(payload)
+    validation_issues = validate_atomic_payload(
+        atomic["roles"],
+        atomic["goals_by_role"],
+        atomic["primary_role_ref"],
+        atomic["primary_goal_ref"],
+    )
+    if validation_issues or gate_issues:
+        data = finalize_hud_data(
+            {
+                "atomic_format": {
+                    "roles": [{"slug": "...", "name": "...", "description": "..."}],
+                    "goals_by_role": {
+                        "role_slug": [{"goal": "...", "done_definition": "..."}]
+                    },
+                    "primary_role_ref": "...",
+                    "primary_goal_ref": "...",
+                },
+                "soul_markdown": written_body,
+                "validation_issues": validation_issues,
+                "soul_gate_issues": gate_issues,
+                "next_action": "fix_atomic_payload",
+            },
+            store=store,
+            user_id=uid,
+            strict_ritual=True,
+        )
+        return web.json_response(
+            hud_success_payload(
+                route, status="ritual_controlled", actor=actor, route_meta=route_meta, data=data
+            ),
+            status=200,
+        )
 
-    ctx = hud_onboarding_context_status()
-    onboarding_required = bool(ctx.get("required"))
+    try:
+        store.set_user_onboarding_atomic(
+            uid,
+            roles=atomic["roles"],
+            goals_by_role=atomic["goals_by_role"],
+            primary_role_ref=str(atomic["primary_role_ref"]),
+            primary_goal_ref=str(atomic["primary_goal_ref"]),
+            requires_approval=hud_extract_default_requires_approval(payload),
+        )
+    except (ValueError, Exception) as exc:
+        logger.exception("HUD set_user_onboarding_atomic failed user_id=%s", uid)
+        return web.json_response(
+            hud_error_payload(
+                f"Failed to persist onboarding state: {exc}",
+                "validation_error",
+                "invalid_payload",
+                route=route,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
 
-    data: Dict[str, Any] = {
+    db_status = hud_onboarding_db_status(store, uid)
+    onboarding_required = bool(db_status.get("required"))
+    data = {
         "path": str(written_path),
         "onboarding_needed": onboarding_required,
-        "onboarding_complete": not onboarding_required,
-        "onboarding_gate_issues": gate_issues,
-        "onboarding_needed_reason": ctx,
+        "onboarding_complete": is_user_fully_onboarded(store, uid),
+        "onboarding_needed_reason": db_status,
+        "populated_from_agent": True,
+        "next_action": "verify_with_brief" if not onboarding_required else "choose_push_policy",
     }
-    if populated_from_agent:
-        data["populated_from_agent"] = True
-        if not gate_issues and not onboarding_required:
-            data["next_action"] = "verify_with_brief"
-    if request is not None and not onboarding_required:
+    if not onboarding_required:
         data.update(hud_push_policy_client_fields(store, uid))
     data = finalize_hud_data(data, store=store, user_id=uid, strict_ritual=False)
     return web.json_response(

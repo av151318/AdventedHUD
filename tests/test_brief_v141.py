@@ -77,7 +77,13 @@ def test_mcp_brief_default_has_full_matrix(app):
 
 def test_onboarding_state_fully_onboarded_when_db_and_push_set(app, tmp_path):
     store = HUDStore(str(tmp_path / "hud.db"))
-    store.set_user_onboarding_state("localuser", role_ref="owner", goal_ref="ship-v1")
+    store.set_user_onboarding_atomic(
+        "localuser",
+        roles=[{"slug": "owner", "name": "Owner", "description": "Lead"}],
+        goals_by_role={"owner": [{"goal": "Ship v1", "done_definition": "Q1"}]},
+        primary_role_ref="owner",
+        primary_goal_ref="Ship v1",
+    )
     store.set_user_push_policy("localuser", external_push=False)
 
     async def run():

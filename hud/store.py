@@ -4,7 +4,7 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +184,20 @@ class HUDStore:
                 conn.execute("ALTER TABLE hud_items ADD COLUMN source_id TEXT")
             if "last_synced_at" not in columns:
                 conn.execute("ALTER TABLE hud_items ADD COLUMN last_synced_at TEXT")
+            onboarding_cols = {
+                row["name"]
+                for row in conn.execute(
+                    f"PRAGMA table_info({_HUD_USER_ONBOARDING_TABLE})"
+                ).fetchall()
+            }
+            if "roles_json" not in onboarding_cols:
+                conn.execute(
+                    f"ALTER TABLE {_HUD_USER_ONBOARDING_TABLE} ADD COLUMN roles_json TEXT"
+                )
+            if "goals_json" not in onboarding_cols:
+                conn.execute(
+                    f"ALTER TABLE {_HUD_USER_ONBOARDING_TABLE} ADD COLUMN goals_json TEXT"
+                )
             conn.commit()
         except sqlite3.Error:
             logger.exception("Failed to initialize HUDStore schema at %s", self.db_path)
@@ -329,7 +343,8 @@ class HUDStore:
         conn = self._connect()
         try:
             row = conn.execute(
-                f"SELECT user_id, role_ref, goal_ref, requires_approval FROM {_HUD_USER_ONBOARDING_TABLE} WHERE user_id = ? LIMIT 1",
+                f"SELECT user_id, role_ref, goal_ref, requires_approval, roles_json, goals_json "
+                f"FROM {_HUD_USER_ONBOARDING_TABLE} WHERE user_id = ? LIMIT 1",
                 (normalized_user_id,),
             ).fetchone()
             if row is None:
@@ -344,9 +359,96 @@ class HUDStore:
                 "role_ref": row["role_ref"],
                 "goal_ref": row["goal_ref"],
                 "requires_approval": normalized_requires_approval,
+                "roles_json": row["roles_json"] if "roles_json" in row.keys() else None,
+                "goals_json": row["goals_json"] if "goals_json" in row.keys() else None,
             }
         finally:
             conn.close()
+
+    def set_user_onboarding_atomic(
+        self,
+        user_id: Any,
+        *,
+        roles: List[Mapping[str, Any]],
+        goals_by_role: Mapping[str, Any],
+        primary_role_ref: str,
+        primary_goal_ref: str,
+        requires_approval: Optional[bool] = None,
+    ) -> bool:
+        from hud.onboarding_db import validate_atomic_payload
+
+        issues = validate_atomic_payload(
+            roles, goals_by_role, primary_role_ref, primary_goal_ref
+        )
+        if issues:
+            raise ValueError(f"invalid atomic onboarding payload: {', '.join(issues)}")
+
+        normalized_user_id = self._coerce_user_id(user_id)
+        if not normalized_user_id:
+            raise ValueError("user_id is required for onboarding state persistence")
+
+        role_ref = str(primary_role_ref).strip()
+        goal_ref = str(primary_goal_ref).strip()
+        roles_json = json.dumps(list(roles), separators=(",", ":"), ensure_ascii=False)
+        goals_json = json.dumps(dict(goals_by_role), separators=(",", ":"), ensure_ascii=False)
+        payload_requires_approval = None
+        if requires_approval is not None:
+            payload_requires_approval = 1 if bool(requires_approval) else 0
+        now = self._now_iso()
+        conn = self._connect()
+        try:
+            conn.execute(
+                f"INSERT INTO {_HUD_USER_ONBOARDING_TABLE} "
+                "(user_id, role_ref, goal_ref, requires_approval, roles_json, goals_json, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET "
+                "role_ref=excluded.role_ref, "
+                "goal_ref=excluded.goal_ref, "
+                "requires_approval=CASE WHEN excluded.requires_approval IS NOT NULL "
+                "THEN excluded.requires_approval ELSE requires_approval END, "
+                "roles_json=excluded.roles_json, "
+                "goals_json=excluded.goals_json, "
+                "updated_at=excluded.updated_at",
+                (
+                    normalized_user_id,
+                    role_ref,
+                    goal_ref,
+                    payload_requires_approval,
+                    roles_json,
+                    goals_json,
+                    now,
+                ),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def get_user_onboarding_atomic(self, user_id: Any) -> Optional[Dict[str, Any]]:
+        row = self.get_user_onboarding_state(user_id)
+        if not row:
+            return None
+        roles_json = row.get("roles_json")
+        goals_json = row.get("goals_json")
+        if not roles_json or not goals_json:
+            return None
+        try:
+            roles = json.loads(roles_json)
+            goals_by_role = json.loads(goals_json)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(roles, list) or not isinstance(goals_by_role, dict):
+            return None
+        return {
+            "user_id": row["user_id"],
+            "role_ref": row.get("role_ref"),
+            "goal_ref": row.get("goal_ref"),
+            "requires_approval": row.get("requires_approval"),
+            "roles": roles,
+            "goals_by_role": goals_by_role,
+            "primary_role_ref": row.get("role_ref"),
+            "primary_goal_ref": row.get("goal_ref"),
+        }
 
     def get_user_push_policy(self, user_id: Any) -> Optional[bool]:
         """True/False once user set post-onboarding push preference; None if never set."""

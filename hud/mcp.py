@@ -43,19 +43,15 @@ from hud.ingest_project import (
     execute_hud_project_approve_reject,
     execute_hud_project_default,
 )
-from hud.onboarding import (
-    hud_onboarding_context_complete,
-    hud_onboarding_context_status,
-    hud_onboarding_dispatch_response,
-    hud_soul_md_path,
-)
+from hud.onboarding import hud_onboarding_dispatch_response, hud_soul_md_path
+from hud.onboarding_db import hud_onboarding_db_status
 from hud.meta import finalize_hud_data
 from hud.store import HUDStore
 from hud.workers import HUDWorkers
 
 logger = logging.getLogger(__name__)
 
-_MCP_UNGATED_ONBOARDING = frozenset({"hud.onboarding"})
+_MCP_UNGATED_ONBOARDING = frozenset({"hud.onboarding", "hud.brief"})
 _MCP_EXEMPT_PUSH_POLICY = frozenset({"hud.onboarding"})
 
 
@@ -126,7 +122,6 @@ async def handle_mcp(request: web.Request) -> web.Response:
             route=HUD_ROUTE_MCP,
             actor=actor,
             user_id=user_id,
-            onboarding_context_status=hud_onboarding_context_status,
         )
         if blocked is not None:
             return blocked
@@ -137,7 +132,6 @@ async def handle_mcp(request: web.Request) -> web.Response:
             route=HUD_ROUTE_MCP,
             actor=actor,
             user_id=user_id,
-            onboarding_context_complete=hud_onboarding_context_complete,
         )
         if push_blocked is not None:
             return push_blocked
@@ -301,7 +295,7 @@ async def _dispatch_brief(
     scoped_items = [item for item in all_items if item.get("scope") == scope]
     deterministic_items = hud_deterministic_items(scoped_items)
     brief_issue_data = hud_sync_issue_data(deterministic_items)
-    onboarding_context = hud_onboarding_context_status()
+    onboarding_context = hud_onboarding_db_status(store, user_id)
     onboarding_needed = onboarding_context["required"]
     has_pending_approval = any(
         item.get("status") == "pending_approval" for item in scoped_items

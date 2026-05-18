@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Mapping, Optional
 
+from hud.onboarding_db import is_user_fully_onboarded
 from hud.store import HUDStore
 
 MCP_EFFICIENCY_INSTRUCTION = (
@@ -29,16 +30,9 @@ def build_mcp_meta(*, strict_ritual: bool) -> Dict[str, str]:
 
 def should_attach_efficiency(store: HUDStore, user_id: str) -> bool:
     try:
-        state = store.get_user_onboarding_state(user_id)
+        return not is_user_fully_onboarded(store, user_id)
     except Exception:
         return True
-    if not state:
-        return True
-    role_ref = state.get("role_ref")
-    goal_ref = state.get("goal_ref")
-    if not role_ref or not goal_ref:
-        return True
-    return False
 
 
 def attach_mcp_meta(

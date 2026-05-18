@@ -34,6 +34,19 @@ def _hud_phase1_env(monkeypatch, tmp_path):
     monkeypatch.setenv("HUD_SOUL_MD_PATH", str(soul))
 
 
+@pytest.fixture
+def onboarded_atomic_db(tmp_path):
+    store = HUDStore(str(tmp_path / "hud.db"))
+    store.set_user_onboarding_atomic(
+        "localuser",
+        roles=[{"slug": "owner", "name": "Owner", "description": "Lead"}],
+        goals_by_role={"owner": [{"goal": "Ship v1", "done_definition": "Q1"}]},
+        primary_role_ref="owner",
+        primary_goal_ref="Ship v1",
+    )
+    return store
+
+
 def _admin_headers():
     return {"X-HUD-Admin-Key": "test-admin-key"}
 
@@ -87,7 +100,7 @@ def test_mcp_method_not_found(app):
     asyncio.run(run())
 
 
-def test_sync_status_with_store_item(app, tmp_path):
+def test_sync_status_with_store_item(app, tmp_path, onboarded_atomic_db):
     store = HUDStore(str(tmp_path / "hud.db"))
     store.upsert_item(
         {
@@ -140,7 +153,7 @@ def test_mcp_brief_worker_backed(app):
     asyncio.run(run())
 
 
-def test_mcp_ingest_creates_item(app):
+def test_mcp_ingest_creates_item(app, onboarded_atomic_db):
     async def run():
         client = TestClient(TestServer(app))
         await client.start_server()
@@ -165,7 +178,7 @@ def test_mcp_ingest_creates_item(app):
     asyncio.run(run())
 
 
-def test_http_ingest_parity(app):
+def test_http_ingest_parity(app, onboarded_atomic_db):
     async def run():
         client = TestClient(TestServer(app))
         await client.start_server()
@@ -185,7 +198,7 @@ def test_http_ingest_parity(app):
     asyncio.run(run())
 
 
-def test_mcp_project_default(app):
+def test_mcp_project_default(app, onboarded_atomic_db):
     async def run():
         client = TestClient(TestServer(app))
         await client.start_server()
@@ -286,7 +299,7 @@ def test_onboarding_read_without_markdown(app):
             assert resp.status == 200
             body = await resp.json()
             assert "markdown" in body["data"]
-            assert body["data"]["onboarding_complete"] is True
+            assert body["data"]["onboarding_needed"] is True
         finally:
             await client.close()
 

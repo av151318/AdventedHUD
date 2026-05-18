@@ -31,11 +31,8 @@ from hud.gates import (
     require_hud_admin,
 )
 from hud.brief_context import build_classification_context
-from hud.onboarding import (
-    hud_onboarding_context_complete,
-    hud_onboarding_context_status,
-    hud_soul_md_path,
-)
+from hud.onboarding import hud_soul_md_path
+from hud.onboarding_db import hud_onboarding_db_status
 from hud.meta import finalize_hud_data
 from hud.store import HUDStore
 from hud.sync import build_brief_sync_report, build_sync_status_payload
@@ -235,7 +232,6 @@ async def handle_sync_status(request: web.Request) -> web.Response:
         route=route,
         actor=actor,
         user_id=user_id,
-        onboarding_context_status=hud_onboarding_context_status,
     )
     if blocked is not None:
         return blocked
@@ -245,7 +241,6 @@ async def handle_sync_status(request: web.Request) -> web.Response:
         route=route,
         actor=actor,
         user_id=user_id,
-        onboarding_context_complete=hud_onboarding_context_complete,
     )
     if push_blocked is not None:
         return push_blocked
@@ -317,25 +312,23 @@ async def handle_brief(request: web.Request) -> web.Response:
 
     user_id = hud_resolve_user_id(request, payload=payload)
 
-    blocked = hud_onboarding_gate_response_if_blocked(
-        store=store,
-        route=HUD_ROUTE_BRIEF,
-        actor=actor,
-        user_id=user_id,
-        onboarding_context_status=hud_onboarding_context_status,
-    )
-    if blocked is not None:
-        return blocked
-
-    push_blocked = hud_push_policy_gate_response_if_blocked(
-        store=store,
-        route=HUD_ROUTE_BRIEF,
-        actor=actor,
-        user_id=user_id,
-        onboarding_context_complete=hud_onboarding_context_complete,
-    )
-    if push_blocked is not None:
-        return push_blocked
+    if explicit_scope:
+        blocked = hud_onboarding_gate_response_if_blocked(
+            store=store,
+            route=HUD_ROUTE_BRIEF,
+            actor=actor,
+            user_id=user_id,
+        )
+        if blocked is not None:
+            return blocked
+        push_blocked = hud_push_policy_gate_response_if_blocked(
+            store=store,
+            route=HUD_ROUTE_BRIEF,
+            actor=actor,
+            user_id=user_id,
+        )
+        if push_blocked is not None:
+            return push_blocked
 
     if not explicit_scope:
         try:
@@ -381,7 +374,7 @@ async def handle_brief(request: web.Request) -> web.Response:
     all_items = items + pending_approval_items
     scoped_items = [item for item in all_items if item.get("scope") == scope]
     deterministic_items = hud_deterministic_items(scoped_items)
-    onboarding_context = hud_onboarding_context_status()
+    onboarding_context = hud_onboarding_db_status(store, user_id)
     onboarding_needed = onboarding_context["required"]
     has_pending_approval = any(
         item.get("status") == "pending_approval" for item in scoped_items

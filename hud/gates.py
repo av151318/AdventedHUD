@@ -233,38 +233,19 @@ def hud_onboarding_gate_response_if_blocked(
     route: str,
     actor: Optional[str],
     user_id: str,
-    onboarding_context_status,
 ) -> Optional[web.Response]:
-    from hud.onboarding import hud_soul_md_gate_issues, hud_soul_md_path
+    from hud.onboarding_db import (
+        hud_onboarding_db_status,
+        is_user_onboarding_atomic_complete,
+    )
 
-    ctx = onboarding_context_status()
-    if not ctx.get("required"):
+    if is_user_onboarding_atomic_complete(store, user_id):
         return None
-    canon = hud_soul_md_path().expanduser().resolve()
-    gate_issues: list[str] = []
-    try:
-        if canon.is_file():
-            gate_issues = hud_soul_md_gate_issues(canon.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        gate_issues = []
-    try:
-        db_state = store.get_user_onboarding_state("default") or {}
-        if not db_state.get("role_ref"):
-            conn = store._connect()
-            row = conn.execute(
-                "SELECT 1 FROM hud_user_onboarding_states WHERE role_ref IS NOT NULL LIMIT 1"
-            ).fetchone()
-            conn.close()
-            if not row:
-                gate_issues = gate_issues + ["atomic_db_state_missing"]
-    except Exception:
-        gate_issues = gate_issues + ["atomic_db_state_check_failed"]
 
+    ctx = hud_onboarding_db_status(store, user_id)
     full_data: Dict[str, Any] = {
         "onboarding_needed": True,
         "onboarding_complete": False,
-        "onboarding_gate_issues": gate_issues,
-        "canonical_path": str(canon),
         "onboarding_needed_reason": ctx,
         "next_action": "onboard",
     }
@@ -290,11 +271,12 @@ def hud_push_policy_gate_response_if_blocked(
     route: str,
     actor: Optional[str],
     user_id: str,
-    onboarding_context_complete,
 ) -> Optional[web.Response]:
+    from hud.onboarding_db import is_user_onboarding_atomic_complete
+
     if not hud_require_post_onboarding_push_policy():
         return None
-    if not onboarding_context_complete():
+    if not is_user_onboarding_atomic_complete(store, user_id):
         return None
     try:
         policy = store.get_user_push_policy(user_id)

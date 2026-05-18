@@ -42,8 +42,6 @@ from hud.handlers import (
 from hud.onboarding import (
     hud_apply_user_onboarding_context,
     hud_extract_default_requires_approval,
-    hud_onboarding_context_complete,
-    hud_onboarding_context_status,
     hud_store_user_onboarding_state,
 )
 from hud.meta import finalize_hud_data
@@ -789,7 +787,6 @@ async def handle_hud_ingest(request: web.Request) -> web.Response:
         route=HUD_ROUTE_INGEST,
         actor=actor,
         user_id=user_id,
-        onboarding_context_status=hud_onboarding_context_status,
     )
     if blocked is not None:
         return blocked
@@ -798,7 +795,6 @@ async def handle_hud_ingest(request: web.Request) -> web.Response:
         route=HUD_ROUTE_INGEST,
         actor=actor,
         user_id=user_id,
-        onboarding_context_complete=hud_onboarding_context_complete,
     )
     if push_blocked is not None:
         return push_blocked
@@ -833,7 +829,6 @@ async def handle_hud_project(request: web.Request) -> web.Response:
         route=HUD_ROUTE_PROJECT,
         actor=actor,
         user_id=user_id,
-        onboarding_context_status=hud_onboarding_context_status,
     )
     if blocked is not None:
         return blocked
@@ -862,7 +857,6 @@ async def handle_hud_project(request: web.Request) -> web.Response:
         route=HUD_ROUTE_PROJECT,
         actor=actor,
         user_id=user_id,
-        onboarding_context_complete=hud_onboarding_context_complete,
     )
     if push_blocked is not None:
         return push_blocked
