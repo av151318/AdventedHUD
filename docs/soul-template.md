@@ -7,9 +7,39 @@
 
 ---
 
+## My Mission Statement
+
+Write your personal mission in one or two sentences. The MCP reads this section first for `hud.brief` (default).
+
+_(If this section is empty, the MCP may fall back to your Vision section below.)_
+
+---
+
 ## 1. Mission Statement
 
 What is your personal mission? If you had to capture the impact you want to make in one or two sentences, what would it be?
+
+---
+
+## Part 12 Roles
+
+| Role Slug | Role Name | Brief Description |
+| --- | --- | --- |
+| example-founder | Founder | Build and ship the product |
+| example-engineer | Engineer | Design reliable systems |
+
+> **Agent note:** Replace example rows with the user's real roles. Slugs use lowercase_with_underscores.
+
+---
+
+## Part 13 Goals Per Role
+
+| Role | Goal | Done |
+| --- | --- | --- |
+| Founder | Reach product-market fit | Meaningful traction with early users |
+| Engineer | Ship a stable v1 platform | Production deploy without critical regressions |
+
+> **Agent note:** One or more goals per role. The **Done** column is qualitative (not KPIs unless the user chose them).
 
 ---
 

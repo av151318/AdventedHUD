@@ -50,11 +50,15 @@ The HUD MCP is **not** an orchestrator. It is a **context and projection service
    You give the agent natural language (chat, voice note, quick dump).
 
 2. **Classification Context**  
-   The agent calls `hud.brief` with no parameters.  
-   The MCP returns your current atomic model:
-   - Your Roles
-   - Your Goals by Role
-   - Decision matrix / priority guidance
+   The agent calls `hud.brief` with no parameters (default mode).  
+   The MCP returns a complete classification payload:
+   - `mission` (from **My Mission Statement**, Vision fallback if empty)
+   - `roles` and `goals_by_role` (from soul.md Part 12 / Part 13 tables)
+   - `decision_matrix` (full FranklinCovey Q1–Q4 structure)
+   - `decision_matrix_guidance` (how to apply the matrix)
+   - `onboarding_state` (`incomplete` | `awaiting_push_policy` | `fully_onboarded`)
+   - `push_policy`
+   - `data.mcp_meta` while onboarding is incomplete (see §8)
 
 3. **Agent Classification**  
    The agent uses this context to classify your input into one or more atomic items, deciding:
@@ -133,7 +137,7 @@ When `hud.brief` (default) is called, the MCP returns the user’s Roles, Goals,
 | `hud.brief` (scoped)  | Returns human-readable briefing for a time period or goal               | When user asks for a plan or review |
 | `hud.ingest`          | Accepts classified item and persists (with optional projection)         | After classification |
 | `hud.project`         | Reviews/decides fate (`project` / `approve` / `reject`) and projects    | For review or explicit approval |
-| `hud.onboarding`      | Reads or writes soul.md with atomic roles & goals                       | Initial setup and later edits |
+| `hud.onboarding`      | Reads or writes soul.md; persists atomic state to DB on write           | Initial setup, profile edits |
 | `hud.mcp`             | JSON-RPC entry point for all tools                                      | Primary surface for agents |
 
 ---
@@ -150,11 +154,73 @@ When `hud.brief` (default) is called, the MCP returns the user’s Roles, Goals,
 
 The MCP uses explicit meta-prompting to keep the agent in a high-efficiency, low-reasoning state while interacting with the system, especially under OWUI’s sequential tool-calling constraints.
 
+### Response shape
+
+Successful tool responses include agent data under `data`. When meta-prompting applies:
+
+```json
+{
+  "data": {
+    "mcp_meta": {
+      "mode": "efficiency",
+      "instruction": "You are inside the MCP — think fast, use minimal reasoning, follow the defined format."
+    }
+  }
+}
+```
+
+| `mcp_meta.mode` | When | `instruction` contents |
+|-----------------|------|-------------------------|
+| `efficiency` | User not `fully_onboarded` (most tools) | General efficiency line only |
+| `strict_ritual` | Onboarding write missing valid atomic payload | Efficiency line **plus** `[MCP RITUAL MODE - STRICT PROCEDURE]` paragraph |
+| _(absent)_ | User `fully_onboarded` and not in strict ritual | Normal operation |
+
+### Rules
+
+1. **No success / completion signals** — There is no `COMPLETE`, `ritual_complete`, or release string. The agent leaves strict mode when `mcp_meta.mode` is not `strict_ritual` on the next successful onboarding step, then verifies via default `hud.brief`.
+2. **Dual-purpose responses** — `data` may include both agent-control fields (`mcp_meta`, `next_action`) and user-facing content (`markdown`, items).
+3. **Default `hud.brief` is always available** — Even while onboarding is incomplete, so the agent can classify using mission, roles, goals, and the decision matrix (with `efficiency` meta attached).
+
+### Tool coverage
+
+| Tool | Meta while incomplete |
+|------|------------------------|
+| `hud.brief` (default) | `efficiency` |
+| `hud.brief` (scoped) | `efficiency` |
+| `hud.ingest`, `hud.project`, `hud.mcp` | `efficiency` (when gated responses include `data`) |
+| `hud.onboarding` (read) | `efficiency` |
+| `hud.onboarding` (write, no atomic) | `strict_ritual` |
+| `hud.onboarding` (profile edit) | none when atomic DB already complete |
+
 ---
 
-## 9. Onboarding & the Soul Template
+## 9. Onboarding, Soul Template & DB Gating
 
-The HUD provides a clean `soul-template.md`. During onboarding the agent helps the user copy it to create their own unique `soul.md`. The system must never overwrite an existing `soul.md`.
+### Soul template
+
+`AdventedHUD/docs/soul-template.md` is the user-facing worksheet. Populated **Part 12** (roles table) and **Part 13** (goals table) sections are required for soul file validation during writes.
+
+### DB-only gating (authoritative)
+
+Tool gating uses `hud_user_onboarding_states`, not file presence alone.
+
+| State | Condition |
+|-------|-----------|
+| **Atomic incomplete** | No row, or missing/invalid `roles_json` + `goals_json`, or failed validation of `roles[]`, `goals_by_role{}`, `primary_role_ref`, `primary_goal_ref` |
+| **Awaiting push** | Atomic complete but `HUD_REQUIRE_POST_ONBOARDING_PUSH=1` and no push policy row |
+| **Fully onboarded** | Valid atomic payload persisted **and** push policy set (when required) |
+
+`role_ref` and `goal_ref` columns are **derived** from the atomic write, not the definition of completeness.
+
+### Onboarding write paths
+
+1. **Ritual** — Markdown write without atomic fields → `status: ritual_controlled`, `mcp_meta.mode: strict_ritual`.
+2. **Atomic complete** — Write with `roles`, `goals_by_role`, `primary_role_ref`, `primary_goal_ref` → persists JSON to DB, `status: ok`, no strict meta.
+3. **Profile edit** — After atomic complete, markdown-only write (or `profile_edit: true`) updates soul.md **without** strict ritual. File gate issues may appear as `soul_validation_warnings` only.
+
+### Push policy
+
+Set via `hud.onboarding` with `external_push_without_approval` (alone or bundled with markdown write).
 
 ---
 

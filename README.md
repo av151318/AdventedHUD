@@ -1,6 +1,8 @@
 # AdventedHUD
 
-Standalone HUD MCP service (Phase 1 complete). Exposes HTTP routes and JSON-RPC MCP on port **8200** by default.
+Standalone HUD MCP service (v1.4.1). Exposes HTTP routes and JSON-RPC MCP on port **8200** by default.
+
+Canonical docs: `docs/hud_foundation_spec.md`, `docs/hud_skill.md`, `docs/soul-template.md`.
 
 ## Run
 
@@ -56,20 +58,24 @@ Approve/reject item fate uses `hud.project` with `{"action":"approve"|"reject","
 | `/hud/mcp` | POST |
 | `/hud/onboarding/soul` | GET, POST |
 
-## Onboarding ritual (v1.4)
+## Onboarding ritual (v1.4.1)
 
 1. `hud.onboarding` read (no markdown) returns worksheet `markdown`.
-2. Write with `markdown` only → `ritual_controlled` + strict procedure tag.
-3. Re-call with `markdown` + atomic `roles` / `goals_by_role` → `ritual_complete` when soul gates pass.
-4. Optional: `external_push_without_approval` boolean on write or alone sets push policy.
+2. Write with `markdown` only → `ritual_controlled` + `data.mcp_meta.mode: strict_ritual` (efficiency + STRICT PROCEDURE text).
+3. Re-call with `markdown` + atomic `roles`, `goals_by_role`, `primary_role_ref`, `primary_goal_ref` → `status: ok`; DB row with `roles_json` / `goals_json`. No COMPLETE signal — verify with default `hud.brief` (`onboarding_state: fully_onboarded`).
+4. Optional: `external_push_without_approval` on write or alone sets push policy.
+5. **Profile edit** (after onboarded): markdown-only write or `profile_edit: true` updates soul without strict ritual.
 
 ## Acceptance script
 
 ```bash
 export HUD_ADMIN_API_KEY=your-secret
 export HUD_REQUIRE_POST_ONBOARDING_PUSH=0
-./scripts/hud_mcp_acceptance.sh
+export HUD_BASE_URL=http://127.0.0.1:8200
+bash scripts/hud_mcp_acceptance.sh
 ```
+
+The script validates `decision_matrix` (Q1–Q4), `mcp_meta` on incomplete onboarding, and runs a minimal atomic onboarding before ingest/project.
 
 ## Adapters path limitation
 
@@ -82,6 +88,6 @@ cd AdventedOS
 PYTHONPATH=AdventedHUD pytest AdventedHUD/tests -q
 ```
 
-## Phase 2 note
+## Path note
 
-`parents[3]` in adapters assumes package layout `AdventedHUD/hud/adapters.py` under repo root. Phase 2 may introduce configurable data roots without changing the five-tool MCP contract.
+`parents[3]` in adapters assumes package layout `AdventedHUD/hud/adapters.py` under repo root. A future release may introduce configurable data roots (`HUD_DATA_ROOT`) without changing the five-tool MCP contract.
