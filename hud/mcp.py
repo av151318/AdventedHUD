@@ -30,6 +30,7 @@ from hud.gates import (
     hud_resolve_user_id,
     require_hud_admin,
 )
+from hud.brief_context import build_classification_context
 from hud.handlers import (
     hud_classify_project_pair,
     hud_deterministic_items,
@@ -46,7 +47,6 @@ from hud.onboarding import (
     hud_onboarding_context_complete,
     hud_onboarding_context_status,
     hud_onboarding_dispatch_response,
-    hud_soul_md_extract_roles_and_goals,
     hud_soul_md_path,
 )
 from hud.meta import finalize_hud_data
@@ -262,45 +262,17 @@ async def _dispatch_brief(
         except OSError as exc:
             return hud_store_error_response(route=HUD_ROUTE_MCP, actor=actor, exc=exc)
 
-        extracted = hud_soul_md_extract_roles_and_goals(soul_content)
-        policy_value = None
-        try:
-            policy_value = store.get_user_push_policy(user_id)
-        except Exception:
-            logger.exception("HUD brief get_user_push_policy failed user_id=%s", user_id)
-
-        push_status = {
-            "set": policy_value is not None,
-            "external_push_without_approval": bool(policy_value)
-            if policy_value is not None
-            else None,
-        }
-        decision_matrix_guidance = {
-            "priority_class": {
-                "values": ["critical", "high", "medium", "low", "normal"],
-                "default_by_intent": {
-                    "ingest": "high",
-                    "brief": "medium",
-                    "project": "normal",
-                    "mcp": "critical",
-                },
-            },
-        }
         classification, projection = hud_classify_project_pair(
             workers, {"intent": HUD_INTENT_BRIEF, **params}, intent=HUD_INTENT_BRIEF
         )
         brief_data = finalize_hud_data(
-            {
-                "mode": "classification_context",
-                "onboarding_state": "fully_onboarded",
-                "push_policy": push_status,
-                "roles": extracted["roles"],
-                "goals_by_role": extracted["goals_by_role"],
-                "role_name_to_slug": extracted.get("role_name_to_slug", {}),
-                "decision_matrix_guidance": decision_matrix_guidance,
-                "classification": classification,
-                "projection": projection,
-            },
+            build_classification_context(
+                store,
+                user_id,
+                soul_content,
+                classification=classification,
+                projection=projection,
+            ),
             store=store,
             user_id=user_id,
         )
