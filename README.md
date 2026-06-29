@@ -107,7 +107,7 @@ AdventedHUD was built to slot into a **three-layer** architecture, with **Advent
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-org/AdventedHUD.git
+git clone https://github.com/av151318/AdventedHUD.git
 cd AdventedHUD
 
 # Build the image
@@ -140,9 +140,9 @@ docker run -d -p 8200:8200 \
 
 ```bash
 # Clone the repo
-git clone https://github.com/your-org/AdventedHUD.git
+git clone https://github.com/av151318/AdventedHUD.git
 cd AdventedHUD
-pip install aiohttp
+pip install -r requirements.txt
 
 export HUD_ADMIN_API_KEY=your-secret-key
 python -m hud.main
