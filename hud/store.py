@@ -371,24 +371,19 @@ class HUDStore:
         *,
         roles: List[Mapping[str, Any]],
         goals_by_role: Mapping[str, Any],
-        primary_role_ref: str,
-        primary_goal_ref: str,
+        primary_role_ref: Optional[str] = None,
+        primary_goal_ref: Optional[str] = None,
         requires_approval: Optional[bool] = None,
     ) -> bool:
         from hud.onboarding_db import validate_atomic_payload
 
-        issues = validate_atomic_payload(
-            roles, goals_by_role, primary_role_ref, primary_goal_ref
-        )
+        issues = validate_atomic_payload(roles, goals_by_role)
         if issues:
             raise ValueError(f"invalid atomic onboarding payload: {', '.join(issues)}")
 
         normalized_user_id = self._coerce_user_id(user_id)
         if not normalized_user_id:
             raise ValueError("user_id is required for onboarding state persistence")
-
-        role_ref = str(primary_role_ref).strip()
-        goal_ref = str(primary_goal_ref).strip()
         roles_json = json.dumps(list(roles), separators=(",", ":"), ensure_ascii=False)
         goals_json = json.dumps(dict(goals_by_role), separators=(",", ":"), ensure_ascii=False)
         payload_requires_approval = None
@@ -402,8 +397,8 @@ class HUDStore:
                 "(user_id, role_ref, goal_ref, requires_approval, roles_json, goals_json, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(user_id) DO UPDATE SET "
-                "role_ref=excluded.role_ref, "
-                "goal_ref=excluded.goal_ref, "
+                "role_ref=CASE WHEN excluded.role_ref IS NOT NULL THEN excluded.role_ref ELSE role_ref END, "
+                "goal_ref=CASE WHEN excluded.goal_ref IS NOT NULL THEN excluded.goal_ref ELSE goal_ref END, "
                 "requires_approval=CASE WHEN excluded.requires_approval IS NOT NULL "
                 "THEN excluded.requires_approval ELSE requires_approval END, "
                 "roles_json=excluded.roles_json, "
@@ -411,8 +406,8 @@ class HUDStore:
                 "updated_at=excluded.updated_at",
                 (
                     normalized_user_id,
-                    role_ref,
-                    goal_ref,
+                    primary_role_ref,
+                    primary_goal_ref,
                     payload_requires_approval,
                     roles_json,
                     goals_json,
@@ -441,13 +436,9 @@ class HUDStore:
             return None
         return {
             "user_id": row["user_id"],
-            "role_ref": row.get("role_ref"),
-            "goal_ref": row.get("goal_ref"),
             "requires_approval": row.get("requires_approval"),
             "roles": roles,
             "goals_by_role": goals_by_role,
-            "primary_role_ref": row.get("role_ref"),
-            "primary_goal_ref": row.get("goal_ref"),
         }
 
     def get_user_push_policy(self, user_id: Any) -> Optional[bool]:

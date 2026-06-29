@@ -32,8 +32,8 @@ from hud.gates import (
 )
 from hud.brief_context import build_classification_context
 from hud.onboarding import hud_soul_md_path
-from hud.onboarding_db import hud_onboarding_db_status
-from hud.meta import finalize_hud_data
+from hud.onboarding_db import hud_onboarding_db_status, is_user_fully_onboarded
+from hud.meta import build_brief_date_meta, finalize_hud_data
 from hud.store import HUDStore
 from hud.sync import build_brief_sync_report, build_sync_status_payload
 from hud.workers import HUDWorkers
@@ -339,17 +339,21 @@ async def handle_brief(request: web.Request) -> web.Response:
         classification, projection = hud_classify_project_pair(
             workers, {"intent": HUD_INTENT_BRIEF}, intent=HUD_INTENT_BRIEF
         )
-        brief_data = finalize_hud_data(
-            build_classification_context(
-                store,
-                user_id,
-                soul_content,
-                classification=classification,
-                projection=projection,
-            ),
-            store=store,
-            user_id=user_id,
+        raw_brief = build_classification_context(
+            store,
+            user_id,
+            soul_content,
+            classification=classification,
+            projection=projection,
+            hub=hub,
         )
+        brief_data = finalize_hud_data(raw_brief, store=store, user_id=user_id)
+
+        # Attach authoritative current mode + date resolution rule in one shot.
+        # build_brief_date_meta now consults the real onboarding state and never leaks bare efficiency.
+        date_meta = build_brief_date_meta(store=store, user_id=user_id)
+        brief_data["mcp_meta"] = date_meta
+
         return web.json_response(
             hud_success_payload(
                 HUD_ROUTE_BRIEF,

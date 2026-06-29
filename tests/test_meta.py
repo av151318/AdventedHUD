@@ -7,12 +7,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from hud.server import create_app
 from hud.store import HUDStore
 
-_MINIMAL_VALID_SOUL_MD = """## Part 12 Roles
+_MINIMAL_VALID_SOUL_MD = """## Roles Matrix
 | Role Slug | Role Name | Brief Description |
 | --- | --- | --- |
 | owner | Owner | Lead |
 
-## Part 13 Goals Per Role
+## Goals Matrix
 | Role | Goal | Done |
 | --- | --- | --- |
 | Owner | Ship v1 | Q1 |

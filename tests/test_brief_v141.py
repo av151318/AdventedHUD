@@ -11,12 +11,12 @@ _SOUL_WITH_MISSION = """## My Mission Statement
 
 Build tools that help people live with intention.
 
-## Part 12 Roles
+## Roles Matrix
 | Role Slug | Role Name | Brief Description |
 | --- | --- | --- |
 | owner | Owner | Lead |
 
-## Part 13 Goals Per Role
+## Goals Matrix
 | Role | Goal | Done |
 | --- | --- | --- |
 | Owner | Ship v1 | Q1 |
@@ -45,7 +45,7 @@ def test_extract_mission_primary_section():
 
 
 def test_extract_mission_vision_fallback():
-    content = "## Vision\n\nServe my community.\n\n## Part 12 Roles\n| a | b | c |\n|---|---|---|\n| x | y | z |"
+    content = "## Vision\n\nServe my community.\n\n## Roles Matrix\n| a | b | c |\n|---|---|---|\n| x | y | z |"
     mission = extract_mission(content)
     assert mission["source"] == "vision_fallback"
     assert "community" in mission["text"]

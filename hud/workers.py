@@ -372,6 +372,9 @@ class HUDWorkers:
         if not text:
             return ""
         normalized = _as_text(text).replace("-", "_").lower()
+        # semantic_type values are NOT valid google_target (event|todo|note vs obsidian|calendar|tasks)
+        if normalized in {"event", "todo", "note", "task", "tasks_list"}:
+            return ""
         if normalized in {"calendar", "google_calendar", "gcal"}:
             return "calendar"
         if normalized in {"tasks", "google_tasks", "gtasks"}:
@@ -380,7 +383,7 @@ class HUDWorkers:
             return "obsidian"
         if normalized == "google":
             return ""
-        return normalized
+        return ""
 
     def _resolve_google_target(self, payload: Mapping[str, Any]) -> str:
         explicit = self._coerce_google_target_for_payload(_as_text(payload.get("google_target")))
@@ -390,6 +393,12 @@ class HUDWorkers:
             return "calendar"
         if self._normalize_hint_value(payload, self._GOOGLE_HINT_KEYS["tasks"]):
             return "tasks"
+
+        # No baked-in default. The agent (after reading the rich default hud.brief
+        # containing current_projection, google_context, dates, push_policy, and
+        # decision_matrix_guidance) decides google_target and passes it explicitly.
+        # Per foundation spec: agent classifies, MCP persists and projects.
+        # Obsidian is primary; Google is secondary only when the agent chooses it.
         return "obsidian"
 
     def _resolve_adapter_target(self, payload: Mapping[str, Any], *, intent: str, google_target: str) -> str:

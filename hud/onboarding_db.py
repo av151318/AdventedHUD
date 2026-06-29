@@ -25,8 +25,6 @@ def _require_post_onboarding_push_policy() -> bool:
 def validate_atomic_payload(
     roles: Any,
     goals_by_role: Any,
-    primary_role_ref: Any,
-    primary_goal_ref: Any,
 ) -> List[str]:
     issues: List[str] = []
     if not isinstance(roles, list) or not roles:
@@ -66,15 +64,6 @@ def validate_atomic_payload(
                 elif not str(goal).strip():
                     issues.append(f"goals_by_role:{role_key}[{gidx}]:missing_goal")
 
-    pref = _normalize_identifier(primary_role_ref)
-    pgf = _normalize_identifier(primary_goal_ref)
-    if not pref:
-        issues.append("primary_role_ref_missing")
-    elif pref not in role_slugs:
-        issues.append("primary_role_ref_not_in_roles")
-    if not pgf:
-        issues.append("primary_goal_ref_missing")
-
     return issues
 
 
@@ -85,8 +74,6 @@ def is_user_onboarding_atomic_complete(store: HUDStore, user_id: str) -> bool:
     issues = validate_atomic_payload(
         atomic.get("roles"),
         atomic.get("goals_by_role"),
-        atomic.get("primary_role_ref"),
-        atomic.get("primary_goal_ref"),
     )
     return not issues
 
@@ -118,8 +105,6 @@ def hud_onboarding_db_status(store: HUDStore, user_id: str) -> Dict[str, Any]:
         issues = validate_atomic_payload(
             atomic.get("roles"),
             atomic.get("goals_by_role"),
-            atomic.get("primary_role_ref"),
-            atomic.get("primary_goal_ref"),
         )
         return {
             "required": True,
@@ -139,6 +124,49 @@ def hud_onboarding_context_complete(store: HUDStore, user_id: str) -> bool:
     return is_user_fully_onboarded(store, user_id)
 
 
+def _parse_atomic_primary_refs(
+    payload: Mapping[str, Any], *, roles: Any, goals_by_role: Any
+) -> Dict[str, Optional[str]]:
+    primary_role_ref = _normalize_identifier(
+        payload.get("primary_role_ref") or payload.get("role_ref")
+    )
+    primary_goal_ref = _normalize_identifier(
+        payload.get("primary_goal_ref") or payload.get("goal_ref")
+    )
+    atomic = payload.get("atomic")
+    if isinstance(atomic, dict):
+        primary_role_ref = primary_role_ref or _normalize_identifier(
+            atomic.get("primary_role_ref") or atomic.get("role_ref")
+        )
+        primary_goal_ref = primary_goal_ref or _normalize_identifier(
+            atomic.get("primary_goal_ref") or atomic.get("goal_ref")
+        )
+    if not primary_role_ref and isinstance(roles, list) and roles:
+        first = roles[0]
+        if isinstance(first, dict):
+            primary_role_ref = _normalize_identifier(
+                first.get("slug") or first.get("role_ref") or first.get("name")
+            )
+    if not primary_goal_ref and isinstance(goals_by_role, dict):
+        for role_key, goals in goals_by_role.items():
+            if not primary_role_ref:
+                primary_role_ref = _normalize_identifier(role_key)
+            if isinstance(goals, list) and goals:
+                g0 = goals[0]
+                if isinstance(g0, dict):
+                    primary_goal_ref = _normalize_identifier(
+                        g0.get("goal") or g0.get("goal_ref")
+                    )
+                elif isinstance(g0, str):
+                    primary_goal_ref = _normalize_identifier(g0)
+            if primary_role_ref and primary_goal_ref:
+                break
+    return {
+        "primary_role_ref": primary_role_ref,
+        "primary_goal_ref": primary_goal_ref,
+    }
+
+
 def parse_atomic_from_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     roles = payload.get("roles") or payload.get("atomic_roles")
     goals_by_role = payload.get("goals_by_role")
@@ -146,14 +174,14 @@ def parse_atomic_from_payload(payload: Mapping[str, Any]) -> Dict[str, Any]:
     if isinstance(atomic, dict):
         roles = roles or atomic.get("roles")
         goals_by_role = goals_by_role or atomic.get("goals_by_role")
-    primary_role_ref = payload.get("primary_role_ref") or payload.get("role_ref")
-    primary_goal_ref = payload.get("primary_goal_ref") or payload.get("goal_ref")
-    if isinstance(atomic, dict):
-        primary_role_ref = primary_role_ref or atomic.get("primary_role_ref") or atomic.get("role_ref")
-        primary_goal_ref = primary_goal_ref or atomic.get("primary_goal_ref") or atomic.get("goal_ref")
+    roles = roles if isinstance(roles, list) else []
+    goals_by_role = goals_by_role if isinstance(goals_by_role, dict) else {}
+    refs = _parse_atomic_primary_refs(
+        payload, roles=roles, goals_by_role=goals_by_role
+    )
     return {
-        "roles": roles if isinstance(roles, list) else [],
-        "goals_by_role": goals_by_role if isinstance(goals_by_role, dict) else {},
-        "primary_role_ref": primary_role_ref,
-        "primary_goal_ref": primary_goal_ref,
+        "roles": roles,
+        "goals_by_role": goals_by_role,
+        "primary_role_ref": refs["primary_role_ref"],
+        "primary_goal_ref": refs["primary_goal_ref"],
     }

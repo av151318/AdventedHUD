@@ -21,7 +21,7 @@ What is your personal mission? If you had to capture the impact you want to make
 
 ---
 
-## Part 12 Roles
+## Roles Matrix
 
 | Role Slug | Role Name | Brief Description |
 | --- | --- | --- |
@@ -32,7 +32,7 @@ What is your personal mission? If you had to capture the impact you want to make
 
 ---
 
-## Part 13 Goals Per Role
+## Goals Matrix
 
 | Role | Goal | Done |
 | --- | --- | --- |

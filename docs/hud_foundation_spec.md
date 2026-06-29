@@ -53,7 +53,7 @@ The HUD MCP is **not** an orchestrator. It is a **context and projection service
    The agent calls `hud.brief` with no parameters (default mode).  
    The MCP returns a complete classification payload:
    - `mission` (from **My Mission Statement**, Vision fallback if empty)
-   - `roles` and `goals_by_role` (from soul.md Part 12 / Part 13 tables)
+   - `roles` and `goals_by_role` (from soul.md Roles Matrix / Goals Matrix tables)
    - `decision_matrix` (full FranklinCovey Q1–Q4 structure)
    - `decision_matrix_guidance` (how to apply the matrix)
    - `onboarding_state` (`incomplete` | `awaiting_push_policy` | `fully_onboarded`)
@@ -198,7 +198,7 @@ Successful tool responses include agent data under `data`. When meta-prompting a
 
 ### Soul template
 
-`AdventedHUD/docs/soul-template.md` is the user-facing worksheet. Populated **Part 12** (roles table) and **Part 13** (goals table) sections are required for soul file validation during writes.
+`AdventedHUD/docs/soul-template.md` is the user-facing worksheet. Populated **Roles Matrix** (roles table) and **Goals Matrix** (goals table) sections are required for soul file validation during writes.
 
 ### DB-only gating (authoritative)
 

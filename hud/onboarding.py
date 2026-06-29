@@ -50,6 +50,20 @@ HUD_SOUL_MD_PLACEHOLDER_TOKENS: tuple[str, ...] = (
 )
 HUD_SOUL_MD_WRITE_MAX_BYTES = 524288
 
+# === Clean table headings for the two atomic data tables (replaces legacy "Part 12/13" Franklin Covey refs)
+# Internal part_numbers 12/13 + "part_12"/"part_13" gate codes kept (minimal, behavior preserved).
+ROLE_TABLE_HEADING = "## Roles Matrix"
+GOAL_TABLE_HEADING = "## Goals Matrix"
+
+def _part_heading(part_number: int) -> str:
+    if part_number == 12: return ROLE_TABLE_HEADING
+    if part_number == 13: return GOAL_TABLE_HEADING
+    return f"## Part {part_number}"
+
+def _part_section_pattern(part_number: int) -> re.Pattern[str]:
+    h = _part_heading(part_number)
+    return re.compile(r"(?ms)^\s*" + re.escape(h) + r"\b.*?(?=^\s*##\s|\Z)")
+
 
 def hud_soul_md_path() -> Path:
     override = os.environ.get("HUD_SOUL_MD_PATH") or os.environ.get("SOUL_MD_PATH")
@@ -78,9 +92,7 @@ def hud_soul_md_worksheet_read_path() -> Path:
 
 
 def hud_soul_md_part_table_populated(content: str, part_number: int) -> bool:
-    part_pattern = re.compile(
-        rf"(?ms)^\s*##\s*Part\s+{part_number}\b.*?(?=^\s*##\s*Part\s+\d+\b|\Z)"
-    )
+    part_pattern = _part_section_pattern(part_number)
     part_match = part_pattern.search(content)
     if not part_match:
         return False
@@ -114,9 +126,9 @@ def hud_soul_md_gate_issues(content: str) -> List[str]:
         if token in lower_content:
             issues.append(f"placeholder_token:{token}")
     if not hud_soul_md_part_table_populated(content, 12):
-        issues.append("part_12:no_populated_table_row")
+        issues.append("roles_matrix:no_populated_table_row")
     if not hud_soul_md_part_table_populated(content, 13):
-        issues.append("part_13:no_populated_table_row")
+        issues.append("goals_matrix:no_populated_table_row")
     return issues
 
 
@@ -271,6 +283,18 @@ def hud_apply_user_onboarding_context(
         enriched["goal_ref"] = context.get("goal_ref")
     if "requires_approval" not in payload and context.get("requires_approval") is not None:
         enriched["requires_approval"] = context.get("requires_approval")
+    if user_id:
+        try:
+            push_policy = store.get_user_push_policy(user_id)
+            if push_policy is True:
+                enriched["requires_approval"] = False
+                enriched.setdefault("external_push_without_approval", True)
+            elif push_policy is False and "requires_approval" not in payload:
+                enriched["requires_approval"] = True
+        except Exception:
+            logger.exception(
+                "Failed to load push policy for onboarding context user_id=%s", user_id
+            )
     return enriched
 
 
@@ -422,11 +446,10 @@ def hud_extract_first_role_goal_from_soul(content: str) -> Dict[str, Optional[st
     if not content or not isinstance(content, str):
         return result
 
-    def part_pattern(n: int) -> re.Pattern[str]:
-        return re.compile(rf"(?ms)^\s*##\s*Part\s+{n}\b.*?(?=^\s*##\s*Part\s+\d+\b|\Z)")
+
 
     separator_pattern = re.compile(r"^\|\s*:?-{3,}\s*(\|\s*:?-{3,}\s*)+\|?$")
-    part12_match = part_pattern(12).search(content)
+    part12_match = _part_section_pattern(12).search(content)
     role_name: Optional[str] = None
     if part12_match:
         table_rows = [
@@ -452,7 +475,7 @@ def hud_extract_first_role_goal_from_soul(content: str) -> Dict[str, Optional[st
                         result["role_description"] = cells[2] or None
                     break
 
-    part13_match = part_pattern(13).search(content)
+    part13_match = _part_section_pattern(13).search(content)
     if part13_match:
         table_rows = [
             line.strip()
@@ -483,9 +506,7 @@ def hud_extract_first_role_goal_from_soul(content: str) -> Dict[str, Optional[st
 
 
 def hud_soul_md_extract_part_section(content: str, part_number: int) -> Optional[str]:
-    part_pattern = re.compile(
-        rf"(?ms)^\s*##\s*Part\s+{part_number}\b.*?(?=^\s*##\s*Part\s+\d+\b|\Z)"
-    )
+    part_pattern = _part_section_pattern(part_number)
     part_match = part_pattern.search(content)
     return part_match.group(0) if part_match else None
 
@@ -739,9 +760,11 @@ def hud_onboarding_soul_build_response(
     validation_issues = validate_atomic_payload(
         atomic["roles"],
         atomic["goals_by_role"],
-        atomic["primary_role_ref"],
-        atomic["primary_goal_ref"],
     )
+    if not atomic.get("primary_role_ref"):
+        validation_issues = list(validation_issues) + ["primary_role_ref_missing"]
+    if not atomic.get("primary_goal_ref"):
+        validation_issues = list(validation_issues) + ["primary_goal_ref_missing"]
     if validation_issues or gate_issues:
         data = finalize_hud_data(
             {
@@ -810,6 +833,74 @@ def hud_onboarding_soul_build_response(
     )
 
 
+
+
+def hud_onboarding_set_atomic_response(
+    *,
+    store: HUDStore,
+    actor: Optional[str],
+    payload: Mapping[str, Any],
+    route: str,
+    route_meta: Optional[Dict[str, Any]] = None,
+    request: Optional[web.Request] = None,
+) -> web.Response:
+    uid = hud_resolve_user_id(request, payload=payload) if request is not None else hud_normalize_identifier(payload.get("user_id")) or "localuser"
+    atomic = parse_atomic_from_payload(payload)
+    issues = validate_atomic_payload(atomic.get("roles"), atomic.get("goals_by_role"))
+    if not atomic.get("primary_role_ref"):
+        issues = list(issues) + ["primary_role_ref_missing"]
+    if not atomic.get("primary_goal_ref"):
+        issues = list(issues) + ["primary_goal_ref_missing"]
+    if issues:
+        return web.json_response(
+            hud_error_payload(
+                "atomic payload invalid: " + ", ".join(issues),
+                "validation_error",
+                "invalid_payload",
+                route=route,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+    try:
+        store.set_user_onboarding_atomic(
+            uid,
+            roles=atomic["roles"],
+            goals_by_role=atomic["goals_by_role"],
+            primary_role_ref=str(atomic.get("primary_role_ref") or ""),
+            primary_goal_ref=str(atomic.get("primary_goal_ref") or ""),
+            requires_approval=hud_extract_default_requires_approval(payload),
+        )
+    except (ValueError, Exception) as exc:
+        logger.exception("set_user_onboarding_atomic failed user_id=%s", uid)
+        return web.json_response(
+            hud_error_payload(
+                f"Failed to persist onboarding state: {exc}",
+                "validation_error",
+                "invalid_payload",
+                route=route,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+    db_status = hud_onboarding_db_status(store, uid)
+    onboarding_required = bool(db_status.get("required"))
+    data: Dict[str, Any] = {
+        "onboarding_needed": onboarding_required,
+        "onboarding_complete": is_user_fully_onboarded(store, uid),
+        "onboarding_needed_reason": db_status,
+        "next_action": "verify_with_brief" if not onboarding_required else "choose_push_policy",
+        "atomic": atomic,
+    }
+    if not onboarding_required:
+        data.update(hud_push_policy_client_fields(store, uid))
+    data = finalize_hud_data(data, store=store, user_id=uid, strict_ritual=False)
+    return web.json_response(
+        hud_success_payload(route, status="ok", actor=actor, route_meta=route_meta, data=data),
+        status=200,
+    )
+
+
 def hud_onboarding_dispatch_response(
     *,
     store: HUDStore,
@@ -861,6 +952,15 @@ def hud_onboarding_dispatch_response(
                 data=push_data,
             ),
             status=200,
+        )
+    if hud_onboarding_params_has_atomic(payload):
+        return hud_onboarding_set_atomic_response(
+            store=store,
+            actor=actor,
+            payload=payload,
+            route=route,
+            route_meta=route_meta,
+            request=request,
         )
     if hud_onboarding_params_has_markdown(payload):
         return hud_onboarding_soul_build_response(
@@ -925,3 +1025,202 @@ async def handle_onboarding_soul_write(request: web.Request) -> web.Response:
         route=HUD_ROUTE_ONBOARDING_SOUL,
         request=request,
     )
+
+async def handle_onboarding_read(request: web.Request) -> web.Response:
+    """GET /hud/onboarding/read: Return current onboarding state (decomposed first-class endpoint)."""
+    from hud.gates import require_hud_admin
+
+    actor = hud_actor(request)
+    admin_error = await require_hud_admin(request)
+    if admin_error is not None:
+        return admin_error
+    store: HUDStore = request.app["hud_store"]
+    return hud_onboarding_soul_read_response(
+        store=store,
+        actor=actor,
+        route=HUD_ROUTE_ONBOARDING_READ,
+        request=request,
+    )
+
+
+async def handle_onboarding_write_soul(request: web.Request) -> web.Response:
+    """POST /hud/onboarding/write_soul: Write soul.md markdown (decomposed first-class endpoint)."""
+    from hud.contracts import require_json
+    from hud.gates import require_hud_admin
+
+    actor = hud_actor(request)
+    admin_error = await require_hud_admin(request)
+    if admin_error is not None:
+        return admin_error
+    try:
+        payload = require_json(await request.text())
+    except ValueError as exc:
+        return web.json_response(
+            hud_error_payload(
+                str(exc),
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_ONBOARDING_WRITE_SOUL,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+    store: HUDStore = request.app["hud_store"]
+    return hud_onboarding_soul_build_response(
+        store=store,
+        actor=actor,
+        payload=payload,
+        route=HUD_ROUTE_ONBOARDING_WRITE_SOUL,
+        request=request,
+    )
+
+
+async def handle_onboarding_set_atomic(request: web.Request) -> web.Response:
+    """POST /hud/onboarding/set_atomic: Set onboarding atomic payload (decomposed first-class endpoint)."""
+    from hud.contracts import require_json
+    from hud.gates import (
+        require_hud_admin,
+        hud_resolve_user_id,
+        hud_push_policy_client_fields,
+    )
+    from hud.onboarding_db import (
+        parse_atomic_from_payload,
+        validate_atomic_payload,
+        hud_onboarding_db_status,
+        is_user_fully_onboarded,
+    )
+
+    actor = hud_actor(request)
+    admin_error = await require_hud_admin(request)
+    if admin_error is not None:
+        return admin_error
+    try:
+        payload = require_json(await request.text())
+    except ValueError as exc:
+        return web.json_response(
+            hud_error_payload(
+                str(exc),
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_ONBOARDING_SET_ATOMIC,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+
+    uid = hud_resolve_user_id(request, payload=payload)
+    atomic = parse_atomic_from_payload(payload)
+    issues = validate_atomic_payload(atomic.get("roles"), atomic.get("goals_by_role"))
+    if issues:
+        return web.json_response(
+            hud_error_payload(
+                f"atomic payload invalid: ', '.join(issues)",
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_ONBOARDING_SET_ATOMIC,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+
+    store: HUDStore = request.app["hud_store"]
+    try:
+        store.set_user_onboarding_atomic(
+            uid,
+            roles=atomic["roles"],
+            goals_by_role=atomic["goals_by_role"],
+            primary_role_ref=str(payload.get("primary_role_ref", "")),
+            primary_goal_ref=str(payload.get("primary_goal_ref", "")),
+            requires_approval=hud_extract_default_requires_approval(payload),
+        )
+    except (ValueError, Exception) as exc:
+        logger.exception("set_user_onboarding_atomic failed user_id=%s", uid)
+        return web.json_response(
+            hud_error_payload(
+                f"Failed to persist onboarding state: {exc}",
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_ONBOARDING_SET_ATOMIC,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+
+    db_status = hud_onboarding_db_status(store, uid)
+    onboarding_required = bool(db_status.get("required"))
+    data: Dict[str, Any] = {
+        "onboarding_needed": onboarding_required,
+        "onboarding_complete": is_user_fully_onboarded(store, uid),
+        "onboarding_needed_reason": db_status,
+        "next_action": "verify_with_brief" if not onboarding_required else "choose_push_policy",
+    }
+    if not onboarding_required:
+        data.update(hud_push_policy_client_fields(store, uid))
+    data = finalize_hud_data(data, store=store, user_id=uid, strict_ritual=False)
+    return web.json_response(
+        hud_success_payload(
+            HUD_ROUTE_ONBOARDING_SET_ATOMIC,
+            status="ok",
+            actor=actor,
+            data=data,
+        ),
+        status=200,
+    )
+
+
+async def handle_onboarding_set_push(request: web.Request) -> web.Response:
+    """POST /hud/onboarding/set_push: Set push policy (decomposed first-class endpoint)."""
+    from hud.contracts import require_json
+    from hud.gates import (
+        require_hud_admin,
+        hud_resolve_user_id,
+        hud_parse_explicit_bool,
+        hud_push_policy_client_fields,
+    )
+    from hud.onboarding_db import hud_onboarding_db_status, is_user_fully_onboarded
+
+    actor = hud_actor(request)
+    admin_error = await require_hud_admin(request)
+    if admin_error is not None:
+        return admin_error
+    try:
+        payload = require_json(await request.text())
+    except ValueError as exc:
+        return web.json_response(
+            hud_error_payload(
+                str(exc),
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_ONBOARDING_SET_PUSH,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+
+    uid = hud_resolve_user_id(request, payload=payload)
+    store: HUDStore = request.app["hud_store"]
+
+    push_error = _apply_push_policy_from_payload(store, uid, payload)
+    if push_error is not None:
+        return push_error
+
+    db_status = hud_onboarding_db_status(store, uid)
+    onboarding_required = bool(db_status.get("required"))
+    data: Dict[str, Any] = {
+        "onboarding_needed": onboarding_required,
+        "onboarding_complete": is_user_fully_onboarded(store, uid),
+        "onboarding_needed_reason": db_status,
+        "next_action": "verify_with_brief",
+    }
+    data.update(hud_push_policy_client_fields(store, uid))
+    data = finalize_hud_data(data, store=store, user_id=uid, strict_ritual=False)
+    return web.json_response(
+        hud_success_payload(
+            HUD_ROUTE_ONBOARDING_SET_PUSH,
+            status="ok",
+            actor=actor,
+            data=data,
+        ),
+        status=200,
+    )
+

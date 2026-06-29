@@ -3,21 +3,26 @@
 from __future__ import annotations
 
 import os
+import re
 import json
 from datetime import datetime, timezone, timedelta
 from hashlib import sha256
+import base64
+import logging
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
 
+logger = logging.getLogger(__name__)
+
 HUDStoreRecord = Dict[str, Any]
 _DEFAULT_CREATED_AT = "1970-01-01T00:00:00+00:00"
 _STATUS_FALLBACK = "pending"
 _HUD_STORE_STATUSES = {"pending", "pending_approval", "queued", "approved", "rejected", "failed", "duplicate"}
 _GLOBAL_STATUS_MAP = {"new": "pending", "queued": "queued", "ready": "queued", "open": "pending", "running": "pending", "active": "queued", "pending": "pending", "approved": "approved", "done": "approved", "completed": "approved", "snoozed": "queued", "rejected": "rejected", "cancelled": "rejected", "failed": "failed", "error": "failed", "duplicate": "duplicate"}
-_DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+_DATA_DIR = Path(os.environ.get("HUD_DATA_DIR", str(Path(__file__).resolve().parents[2] / "data"))).expanduser()
 _GOOGLE_OAUTH_DEFAULT_FILES = ("gOAuth1.json", "gOAuth2.json")
 _GOOGLE_OAUTH_DEFAULT_TOKEN_FILES = ("gOAuth1.token.json", "gOAuth2.token.json")
 _GOOGLE_OAUTH_ENV_HINTS = (
@@ -78,6 +83,49 @@ def _mask_client_secret(value: Optional[str]) -> Optional[str]:
         return "***"
     return f"{secret[:4]}...{secret[-4:]}"
 
+
+
+
+# ── Token encryption at rest ──────────────────────────────────────
+_TOKEN_ENC_PREFIX = "_enc:"
+
+def _get_token_encryption_key() -> bytes:
+    key_text = os.environ.get("GOOGLE_TOKEN_ENCRYPTION_KEY", "")
+    if not key_text:
+        key_text = "adventedos-default-enc-key-change-me"
+    return sha256(key_text.encode("utf-8")).digest()
+
+
+def _encrypt_token_value(plaintext: str, key=None) -> str:
+    if not plaintext:
+        return plaintext
+    if key is None:
+        key = _get_token_encryption_key()
+    data = plaintext.encode("utf-8")
+    result = bytearray(len(data))
+    for i, b in enumerate(data):
+        result[i] = b ^ key[i % len(key)]
+    return _TOKEN_ENC_PREFIX + base64.b64encode(bytes(result)).decode("ascii")
+
+
+def _decrypt_token_value(ciphertext: str, key=None) -> str:
+    if not ciphertext or not ciphertext.startswith(_TOKEN_ENC_PREFIX):
+        return ciphertext
+    if key is None:
+        key = _get_token_encryption_key()
+    raw = base64.b64decode(ciphertext[len(_TOKEN_ENC_PREFIX):])
+    result = bytearray(len(raw))
+    for i, b in enumerate(raw):
+        result[i] = b ^ key[i % len(key)]
+    return result.decode("utf-8")
+
+
+def _maybe_decrypt_token_payload(payload):
+    payload = dict(payload)
+    rt = payload.get("refresh_token")
+    if isinstance(rt, str) and rt.startswith(_TOKEN_ENC_PREFIX):
+        payload["refresh_token"] = _decrypt_token_value(rt)
+    return payload
 
 def _coerce_string_list(value: Any) -> Sequence[str]:
     if value is None:
@@ -308,6 +356,8 @@ def _normalize_google_token_payload(raw: Mapping[str, Any]) -> Dict[str, Any]:
         normalized["token_uri"] = _GOOGLE_OAUTH_REFRESH_URL
     if "scope" in normalized:
         normalized.pop("scope")
+    normalized["reauth_required"] = bool(normalized.get("reauth_required"))
+    normalized = _maybe_decrypt_token_payload(normalized)
     return normalized
 
 
@@ -487,6 +537,67 @@ def _unwrap_payload_value(payload: Mapping[str, Any], *, max_depth: int = 5) -> 
     return normalized_payload
 
 
+def _extract_date(s):
+    if not s:
+        return None
+    m = re.search(r"(\d{4}-\d{2}-\d{2})", s)
+    return m.group(1) if m else None
+
+def _rfc3339_date(date_str):
+    return f"{date_str}T00:00:00.000Z"
+
+def _normalize_task_due(payload):
+    p = _unwrap_payload_value(payload)
+    result = {
+        "granularity": "date",
+        "date": None,
+        "dateTime": None,
+        "timeZone": None,
+        "inferred": False,
+    }
+    due_str = _as_text(p.get("due"), default=_as_text(p.get("scheduled_for"), default=None))
+    if due_str:
+        date_match = re.match(r"^(\d{4}-\d{2}-\d{2})", due_str)
+        if date_match:
+            result["date"] = date_match.group(1)
+            if len(due_str) > 10:
+                result["granularity"] = "datetime"
+                result["dateTime"] = due_str
+        return result
+    d_str = _as_text(p.get("date"))
+    if d_str and re.match(r"^\d{4}-\d{2}-\d{2}$", d_str):
+        result["date"] = d_str
+        return result
+    return result
+
+def _normalize_event_time(value, time_zone=None):
+    if isinstance(value, dict):
+        if "dateTime" in value:
+            dt = _as_text(value.get("dateTime"))
+            if dt:
+                r = {"dateTime": dt}
+                tz = _as_text(value.get("timeZone")) or time_zone
+                if tz:
+                    r["timeZone"] = tz
+                return r
+        if "date" in value:
+            d = _as_text(value.get("date"))
+            if d and re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+                return {"date": d}
+        return None
+    text_time = _as_text(value, default=None)
+    if text_time is None:
+        return None
+    is_all_day = len(text_time) == 10 and text_time[4] == "-" and text_time[7] == "-"
+    if is_all_day:
+        return {"date": text_time}
+    r = {"dateTime": text_time}
+    if time_zone is not None:
+        r["timeZone"] = time_zone
+    return r
+
+
+
 def _google_api_is_token_error(api_error: Optional[Mapping[str, Any]]) -> bool:
     if not isinstance(api_error, Mapping):
         return False
@@ -619,9 +730,13 @@ def _google_refresh_access_token(
 
 def _persist_google_token_file(path: Path, token_payload: Mapping[str, Any]) -> None:
     try:
+        payload = dict(_normalize_google_token_payload(token_payload))
+        rt = payload.get("refresh_token")
+        if isinstance(rt, str) and rt and not rt.startswith(_TOKEN_ENC_PREFIX):
+            payload["refresh_token"] = _encrypt_token_value(rt)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf-8") as handle:
-            json.dump(_normalize_google_token_payload(token_payload), handle, ensure_ascii=False, indent=2)
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
     except (OSError, TypeError, ValueError):
         return
 
@@ -643,13 +758,17 @@ def _google_ensure_access_token(
 
     token_payload_map = _normalize_google_token_payload(token_payload)
     token_state = _google_oauth_token_state(token_payload_map, token_source=token_source)
+
+    if token_payload_map.get("reauth_required"):
+        return None, token_payload_map, token_state, {"code": "reauth_required", "message": f"{adapter_name} reauth required for action={action}"}
+
     access_token = _as_text(token_payload_map.get("access_token"), default=None)
     if access_token is not None and not force_refresh and not _google_token_is_expired(token_payload_map):
         return access_token, token_payload_map, token_state, None
 
     refresh_token = _as_text(token_payload_map.get("refresh_token"), default=None)
     if refresh_token is None:
-        return None, token_payload_map, token_state, {"code": "auth_required", "message": f"{adapter_name} token refresh required for action={action}"}
+        return None, token_payload_map, token_state, {"code": "reauth_required", "message": f"{adapter_name} token refresh required for action={action}"}
 
     token_uri = _as_text(token_payload_map.get("token_uri"), default=_GOOGLE_OAUTH_REFRESH_URL)
     if token_uri is None:
@@ -657,6 +776,14 @@ def _google_ensure_access_token(
 
     refreshed, refresh_error = _google_refresh_access_token(metadata=metadata, token_payload=token_payload_map, token_uri=token_uri)
     if refresh_error is not None:
+        err_body = _as_text(refresh_error.get("body"), default="").lower()
+        if "invalid_grant" in err_body or "revoked" in err_body:
+            logger.warning("GOOGLE_OAUTH refresh_terminal adapter=%s action=%s reason=invalid_grant", adapter_name, action)
+            token_payload_map["reauth_required"] = True
+            if isinstance(token_path, Path):
+                _persist_google_token_file(token_path, token_payload_map)
+            return None, token_payload_map, token_state, {"code": "reauth_required", "message": f"{adapter_name} token expired or revoked for action={action}"}
+        logger.warning("GOOGLE_OAUTH refresh_failure adapter=%s action=%s code=%s", adapter_name, action, refresh_error.get("code", "?"))
         return None, token_payload_map, token_state, refresh_error
     if refreshed is None:
         return None, token_payload_map, token_state, {"code": "auth_required", "message": f"{adapter_name} token refresh returned empty payload for action={action}"}
@@ -668,6 +795,7 @@ def _google_ensure_access_token(
     if refreshed_access is None:
         return None, refreshed, _google_oauth_token_state(refreshed, token_source=token_source), {"code": "auth_required", "message": f"{adapter_name} refresh result missing access_token for action={action}"}
 
+    logger.info("GOOGLE_OAUTH refresh_ok adapter=%s action=%s expires_in=%s", adapter_name, action, refreshed.get("expires_in", "?"))
     return refreshed_access, refreshed, _google_oauth_token_state(refreshed, token_source=token_source), None
 
 
@@ -676,33 +804,12 @@ def _google_event_payload_from_input(payload: Mapping[str, Any]) -> Dict[str, An
 
     time_zone = _as_text(normalized_payload.get("time_zone"), default=None)
 
-    def _coerce_time(raw_time: Any) -> Optional[Dict[str, Any]]:
-        if isinstance(raw_time, Mapping):
-            normalized_time = dict(raw_time)
-            if "dateTime" in normalized_time and _as_text(normalized_time.get("timeZone"), default=None) is None and time_zone is not None:
-                normalized_time["timeZone"] = time_zone
-            if "date" in normalized_time or "dateTime" in normalized_time:
-                return normalized_time
-            return None
-
-        text_time = _as_text(raw_time, default=None)
-        if text_time is None:
-            return None
-        is_all_day = len(text_time) == 10 and text_time[4] == "-" and text_time[7] == "-"
-        if is_all_day:
-            block: Dict[str, Any] = {"date": text_time}
-        else:
-            block = {"dateTime": text_time}
-            if time_zone is not None:
-                block["timeZone"] = time_zone
-        return block
-
     body: Dict[str, Any] = {}
-    summary = _as_text(normalized_payload.get("summary"), default=_as_text(normalized_payload.get("title"), default=None))
+    summary = _as_text(normalized_payload.get("summary"), default=_as_text(normalized_payload.get("title"), default=_as_text(normalized_payload.get("text"), default=None)))
     if summary is not None:
         body["summary"] = summary
-    start = _coerce_time(normalized_payload.get("start"))
-    end = _coerce_time(normalized_payload.get("end"))
+    start = _normalize_event_time(normalized_payload.get("start"), time_zone=time_zone)
+    end = _normalize_event_time(normalized_payload.get("end"), time_zone=time_zone)
     if start is not None:
         body["start"] = start
     if end is not None:
@@ -724,7 +831,10 @@ def _google_task_payload_from_input(payload: Mapping[str, Any]) -> Dict[str, Any
         normalized_payload.get("title"),
         default=_as_text(
             normalized_payload.get("summary"),
-            default=_as_text(normalized_payload.get("name"), default=None),
+            default=_as_text(
+                normalized_payload.get("name"),
+                default=_as_text(normalized_payload.get("text"), default=None),
+            ),
         ),
     )
     if title is not None:
@@ -735,6 +845,13 @@ def _google_task_payload_from_input(payload: Mapping[str, Any]) -> Dict[str, Any
     )
     if description is not None:
         body["notes"] = description
+
+    # Due — normalized RFC 3339, always from date only
+    # Google Tasks discards time: serialize at UTC midnight.
+    _task_due_nt = _normalize_task_due(normalized_payload)
+    if _task_due_nt["date"]:
+        body["due"] = _rfc3339_date(_task_due_nt["date"])
+
     return body
 
 
@@ -982,6 +1099,38 @@ class GoogleCalendarAdapter(BaseHUDAdapter):
     status_map = {**_GLOBAL_STATUS_MAP, "confirmed": "approved", "tentative": "queued", "needsAction": "pending", "accepted": "approved", "declined": "rejected", "cancelled": "rejected"}
     _EVENT_SEED = ({"event_id": "evt:standup", "title": "Standup", "calendar": "primary", "status": "confirmed"}, {"event_id": "evt:shipping", "title": "Shipping", "calendar": "primary", "status": "tentative"})
 
+    def list_calendars(self, payload: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """Return the user's actual Google Calendars."""
+        normalized = _coerce_payload(payload or {})
+        oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
+        if oauth_metadata is None:
+            return {"calendars": [], "error": "no_oauth"}
+
+        token_context = _resolve_google_token_context(normalized, oauth_metadata_path=oauth_path)
+        access_token, _, _, access_error = _google_ensure_access_token(
+            adapter_name=self.adapter_name,
+            action="gcal.list_calendars",
+            metadata=oauth_metadata,
+            token_context=token_context,
+        )
+        if access_error or not access_token:
+            return {"calendars": [], "error": "auth_failed"}
+
+        try:
+            url = "https://www.googleapis.com/calendar/v3/users/me/calendarList"
+            headers = {"Authorization": f"Bearer {access_token}"}
+            import urllib.request, json
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+                cals = [
+                    {"id": item.get("id"), "summary": item.get("summary")}
+                    for item in data.get("items", [])
+                ]
+                return {"calendars": cals, "error": None}
+        except Exception as e:
+            return {"calendars": [], "error": str(e)}
+
     async def upsert_item(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
         normalized = _coerce_payload(payload)
         oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
@@ -1039,6 +1188,40 @@ class GoogleCalendarAdapter(BaseHUDAdapter):
                 "status": "error",
                 "code": "error",
                 "message": "gcal.upsert missing event payload",
+                "metadata": metadata_response,
+            }
+
+        # Shape validation (Google Calendar API contract)
+        _cal_start = request_body.get("start")
+        _cal_end = request_body.get("end")
+        if not _cal_start or not _cal_end:
+            return {
+                "status": "error",
+                "code": "validation_error",
+                "message": "gcal.upsert requires both start and end",
+                "metadata": metadata_response,
+            }
+        _cal_has_dt = "dateTime" in _cal_start
+        _cal_has_d = "date" in _cal_start
+        if not _cal_has_dt and not _cal_has_d:
+            return {
+                "status": "error",
+                "code": "validation_error",
+                "message": "gcal.upsert start must have date or dateTime",
+                "metadata": metadata_response,
+            }
+        if _cal_has_dt and "dateTime" not in _cal_end:
+            return {
+                "status": "error",
+                "code": "validation_error",
+                "message": "gcal.upsert end must use dateTime when start uses dateTime",
+                "metadata": metadata_response,
+            }
+        if _cal_has_d and "date" not in _cal_end:
+            return {
+                "status": "error",
+                "code": "validation_error",
+                "message": "gcal.upsert end must use date when start uses date",
                 "metadata": metadata_response,
             }
         encoded_calendar_id = urllib.parse.quote(_as_text(calendar_id, default="primary"), safe="")
@@ -1172,6 +1355,38 @@ class GoogleTasksAdapter(BaseHUDAdapter):
     placeholder_endpoints = {"tasks": "v1://adapters/google-tasks/tasks", "upsert": "v1://adapters/google-tasks/upsert", "sync": "v1://adapters/google-tasks/sync"}
     status_map = {**_GLOBAL_STATUS_MAP, "needsAction": "pending", "needs_action": "pending", "in_progress": "pending", "completed": "approved"}
     _TASK_SEED = ({"task_id": "task:seed-1", "title": "Review architecture doc", "status": "needsAction"}, {"task_id": "task:seed-2", "title": "Finish test harness", "status": "completed"})
+
+    def list_task_lists(self, payload: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+        """Return the user's actual Google Task lists."""
+        normalized = _coerce_payload(payload or {})
+        oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
+        if oauth_metadata is None:
+            return {"task_lists": [], "error": "no_oauth"}
+
+        token_context = _resolve_google_token_context(normalized, oauth_metadata_path=oauth_path)
+        access_token, _, _, access_error = _google_ensure_access_token(
+            adapter_name=self.adapter_name,
+            action="gtasks.list_task_lists",
+            metadata=oauth_metadata,
+            token_context=token_context,
+        )
+        if access_error or not access_token:
+            return {"task_lists": [], "error": "auth_failed"}
+
+        try:
+            url = "https://www.googleapis.com/tasks/v1/users/@me/lists"
+            headers = {"Authorization": f"Bearer {access_token}"}
+            import urllib.request, json
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode())
+                lists = [
+                    {"id": item.get("id"), "title": item.get("title")}
+                    for item in data.get("items", [])
+                ]
+                return {"task_lists": lists, "error": None}
+        except Exception as e:
+            return {"task_lists": [], "error": str(e)}
 
     async def upsert_item(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
         normalized = _coerce_payload(payload)

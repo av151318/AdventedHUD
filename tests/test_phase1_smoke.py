@@ -6,12 +6,12 @@ from aiohttp.test_utils import TestClient, TestServer
 from hud.server import create_app
 from hud.store import HUDStore
 
-_MINIMAL_VALID_SOUL_MD = """## Part 12 Roles
+_MINIMAL_VALID_SOUL_MD = """## Roles Matrix
 | Role Slug | Role Name | Brief Description |
 | --- | --- | --- |
 | owner | Owner | Lead |
 
-## Part 13 Goals Per Role
+## Goals Matrix
 | Role | Goal | Done |
 | --- | --- | --- |
 | Owner | Ship v1 | Q1 |
@@ -25,9 +25,9 @@ def _hud_phase1_env(monkeypatch, tmp_path):
     monkeypatch.setenv("HUD_DB_PATH", str(tmp_path / "hud.db"))
     soul = tmp_path / "soul.md"
     soul.write_text(
-        "## Part 12 Roles\n| Role Slug | Role Name | Brief Description |\n"
+        "## Roles Matrix\n| Role Slug | Role Name | Brief Description |\n"
         "| --- | --- | --- |\n| owner | Owner | Lead |\n\n"
-        "## Part 13 Goals Per Role\n| Role | Goal | Done |\n"
+        "## Goals Matrix\n| Role | Goal | Done |\n"
         "| --- | --- | --- |\n| Owner | Ship v1 | Q1 |\n",
         encoding="utf-8",
     )

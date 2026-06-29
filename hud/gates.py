@@ -20,7 +20,7 @@ from hud.contracts import (
     normalize_projection_mode,
     parse_projection_mode,
 )
-from hud.meta import finalize_hud_data
+from hud.meta import build_rich_error_meta, finalize_hud_data, get_current_mcp_mode_meta
 from hud.store import HUDStore
 
 logger = logging.getLogger(__name__)
@@ -237,11 +237,16 @@ def hud_onboarding_gate_response_if_blocked(
     from hud.onboarding_db import (
         hud_onboarding_db_status,
         is_user_onboarding_atomic_complete,
+        is_user_fully_onboarded,
     )
 
-    if is_user_onboarding_atomic_complete(store, user_id):
+    if is_user_fully_onboarded(store, user_id):
         return None
-
+    if not is_user_onboarding_atomic_complete(store, user_id):
+        ctx = hud_onboarding_db_status(store, user_id)
+    else:
+        # atomic complete but push pending: do not block here (primary gate is fully); let push gate give precise guidance
+        return None
     ctx = hud_onboarding_db_status(store, user_id)
     full_data: Dict[str, Any] = {
         "onboarding_needed": True,
@@ -254,6 +259,14 @@ def hud_onboarding_gate_response_if_blocked(
         store=store,
         user_id=user_id,
     )
+    # Rich mode-aware diagnostic for the agent
+    error_data["mcp_meta"] = build_rich_error_meta(
+        current_mode="onboarding",
+        tool="gated path",
+        violation="onboarding not complete (no valid atomic record)",
+        guidance="Follow ONBOARDING sequence: read template → survey user → submit full atomic in one call. 409s will indicate what is still required.",
+    )
+
     body = hud_error_payload(
         "Complete personal context onboarding (soul.md) before this HUD operation.",
         "onboarding_required",
@@ -296,6 +309,14 @@ def hud_push_policy_gate_response_if_blocked(
         store=store,
         user_id=user_id,
     )
+    # Rich diagnostic 409 for the agent in operational state
+    error_data["mcp_meta"] = build_rich_error_meta(
+        current_mode="operational",
+        tool="push policy gate",
+        violation="push preference not yet set after atomic onboarding",
+        guidance="Ask the user for their push preference (external_push_without_approval) using a short targeted question if needed, then call hud.onboarding with it.",
+    )
+
     body = hud_error_payload(
         "Mission profile is ready; confirm whether HUD may push to external calendar and tasks "
         "without per-item approval.",

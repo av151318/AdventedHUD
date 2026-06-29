@@ -1,6 +1,28 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+
+# Database files
 *.db
+
+# Environment files
 .env
 .venv/
+
+# Credentials and secrets
+data/
+gOAuth*.json
+*.token.json
+
+# Editor / OS artifacts
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Temporary / backup files
+*.bak
+*.bak-*
+*.bak*
+
+

@@ -43,7 +43,7 @@ from hud.ingest_project import (
     execute_hud_project_approve_reject,
     execute_hud_project_default,
 )
-from hud.onboarding import hud_onboarding_dispatch_response, hud_soul_md_path
+from hud.onboarding import hud_onboarding_dispatch_response, hud_onboarding_soul_read_response, hud_onboarding_soul_build_response, hud_soul_md_path
 from hud.onboarding_db import hud_onboarding_db_status
 from hud.meta import finalize_hud_data
 from hud.store import HUDStore
@@ -51,8 +51,21 @@ from hud.workers import HUDWorkers
 
 logger = logging.getLogger(__name__)
 
-_MCP_UNGATED_ONBOARDING = frozenset({"hud.onboarding", "hud.brief"})
-_MCP_EXEMPT_PUSH_POLICY = frozenset({"hud.onboarding"})
+_MCP_UNGATED_ONBOARDING = frozenset({
+    "hud.onboarding",
+    "hud.onboarding.read",
+    "hud.onboarding.write_soul",
+    "hud.onboarding.set_atomic",
+    "hud.onboarding.set_push",
+    "hud.brief",
+})
+_MCP_EXEMPT_PUSH_POLICY = frozenset({
+    "hud.onboarding",
+    "hud.onboarding.read",
+    "hud.onboarding.write_soul",
+    "hud.onboarding.set_atomic",
+    "hud.onboarding.set_push",
+})
 
 
 async def handle_mcp(request: web.Request) -> web.Response:
@@ -139,14 +152,16 @@ async def handle_mcp(request: web.Request) -> web.Response:
     route_meta = hud_route_meta(workers, route_intent, method=method, jsonrpc=jsonrpc)
 
     if route_intent == HUD_INTENT_ONBOARDING:
-        return hud_onboarding_dispatch_response(
-            store=store,
-            actor=actor,
-            payload=params,
-            route=HUD_ROUTE_MCP,
-            route_meta=route_meta,
-            request=request,
-        )
+        # Decomposed narrow methods (per MCP_ONBOARDING_MODE). Legacy falls to shim.
+        if method == "hud.onboarding.read":
+            return hud_onboarding_soul_read_response(store=store, actor=actor, route=HUD_ROUTE_MCP, route_meta=route_meta, request=request)
+        elif method == "hud.onboarding.write_soul":
+            return hud_onboarding_soul_build_response(store=store, actor=actor, payload=params, route=HUD_ROUTE_MCP, route_meta=route_meta, request=request)
+        elif method in ("hud.onboarding.set_atomic", "hud.onboarding.set_push"):
+            return hud_onboarding_dispatch_response(store=store, actor=actor, payload=params, route=HUD_ROUTE_MCP, route_meta=route_meta, request=request)
+        else:
+            # legacy hud.onboarding shim
+            return hud_onboarding_dispatch_response(store=store, actor=actor, payload=params, route=HUD_ROUTE_MCP, route_meta=route_meta, request=request)
 
     if route_intent == HUD_INTENT_BRIEF:
         return await _dispatch_brief(

@@ -44,7 +44,13 @@ from hud.onboarding import (
     hud_extract_default_requires_approval,
     hud_store_user_onboarding_state,
 )
-from hud.meta import finalize_hud_data
+from hud.onboarding_db import is_user_fully_onboarded
+from hud.meta import (
+    build_ingest_mcp_meta,
+    build_rich_error_meta,
+    finalize_hud_data,
+    get_current_mcp_mode_meta,
+)
 from hud.store import HUDStore
 from hud.workers import HUDWorkers
 
@@ -54,6 +60,82 @@ _HUD_TERMINAL_STATUSES = frozenset({"approved", "rejected", "failed", "duplicate
 _HUD_PROJECTION_DISPATCH_STATUSES = frozenset({"queued", "approved"})
 
 
+def hud_google_target_projects_externally(google_target: Any) -> bool:
+    gt = str(google_target or "").strip().lower()
+    return gt in ("calendar", "gcal", "google_calendar", "tasks", "gtasks")
+
+
+
+
+def _ingest_explicit_requires_approval(payload: Mapping[str, Any]) -> bool:
+    raw = payload.get("requires_approval")
+    if raw is True:
+        return True
+    if isinstance(raw, str) and raw.strip().lower() in {"true", "1", "yes"}:
+        return True
+    if raw == 1:
+        return True
+    return False
+
+
+def hud_build_deferred_google_projection(
+    *,
+    google_target: str,
+    item_status: str,
+    projection_mode: str,
+    reason: str = "awaiting_approval",
+) -> Dict[str, Any]:
+    return {
+        "status": "deferred",
+        "reason": reason,
+        "google_target": google_target,
+        "item_status": item_status,
+        "projection_mode": projection_mode,
+        "message": "Google projection deferred until item is approved",
+    }
+
+
+def hud_ingest_auto_approve_push(
+    store: HUDStore, user_id: str, projection_mode: str
+) -> bool:
+    if projection_mode != HUD_PROJECTION_MODE_LIVE or not user_id:
+        return False
+    try:
+        return store.get_user_push_policy(user_id) is True
+    except Exception:
+        logger.exception("Failed to read push policy for ingest user_id=%s", user_id)
+        return False
+
+
+async def hud_resolve_google_projection_for_ingest(
+    hub: HUDAdapterHub,
+    *,
+    item: Dict[str, Any],
+    actor: Optional[str],
+    google_target: str,
+    item_status: str,
+    projection_mode: str,
+    auto_approve_push: bool,
+) -> Optional[Dict[str, Any]]:
+    if not hud_google_target_projects_externally(google_target):
+        return None
+    if auto_approve_push and hud_projection_can_dispatch(item_status, projection_mode):
+        return await _hud_google_projection_dispatch(
+            hub,
+            item,
+            actor,
+            item_status,
+            projection_mode=projection_mode,
+        )
+    reason = "awaiting_approval"
+    if item_status == "queued" and not auto_approve_push:
+        reason = "awaiting_approval"
+    return hud_build_deferred_google_projection(
+        google_target=google_target,
+        item_status=item_status,
+        projection_mode=projection_mode,
+        reason=reason,
+    )
 def hud_is_terminal_status(status: Any) -> bool:
     return str(status or "").strip().lower() in _HUD_TERMINAL_STATUSES
 
@@ -190,6 +272,54 @@ async def hud_dispatch_projection(
         }
 
 
+async def _hud_google_projection_dispatch(
+    hub: HUDAdapterHub,
+    item: Dict[str, Any],
+    actor: Optional[str],
+    status: str,
+    *,
+    projection_mode: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Secondary dispatch to Google adapter when google_target is set.
+
+    Called after the primary Obsidian dispatch. The Google adapter's own
+    status gate (approved check) determines whether it actually fires.
+    """
+    google_target = (item.get("google_target") or "").lower()
+    if not google_target:
+        return None
+    if google_target in ("obsidian", "base", "role", "goal"):
+        return None
+    if not hud_google_target_projects_externally(google_target):
+        logger.warning(
+            "Google projection: unsupported google_target=%s item=%s",
+            google_target,
+            item.get("internal_id", "?"),
+        )
+        return {
+            "status": "error",
+            "code": "unknown_google_target",
+            "message": "Unsupported google_target: %s" % google_target,
+        }
+
+    payload_dict = hud_projection_payload_for_item(
+        item, actor, status, projection_mode=projection_mode,
+    )
+
+    if google_target in ("tasks", "gtasks"):
+        logger.info("Google projection: gtasks.upsert status=%s item=%s", status, item.get("internal_id", "?"))
+        return await hud_dispatch_projection(hub, "gtasks.upsert", payload_dict)
+    if google_target in ("calendar", "gcal", "google_calendar"):
+        logger.info("Google projection: gcal.upsert status=%s item=%s", status, item.get("internal_id", "?"))
+        return await hud_dispatch_projection(hub, "gcal.upsert", payload_dict)
+
+    return {
+        "status": "error",
+        "code": "unknown_google_target",
+        "message": "Unsupported google_target: %s" % google_target,
+    }
+
+
 def hud_adapter_projection_failed(adapter_projection: Dict[str, Any]) -> bool:
     if str(adapter_projection.get("status", "")).strip().lower() in {"error", "blocked"}:
         return True
@@ -256,36 +386,44 @@ async def execute_hud_ingest(
     actor: Optional[str],
     route_meta: Optional[Dict[str, Any]] = None,
 ) -> web.Response:
+    user_id = hud_resolve_user_id(request, payload=payload)
     try:
         scope = parse_hud_scope(payload.get("scope"))
     except ValueError as exc:
-        return web.json_response(
-            hud_error_payload(
-                str(exc),
-                "validation_error",
-                "invalid_payload",
-                route=route,
-                actor=actor,
-            ),
-            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
         )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.ingest",
+            violation=f"invalid scope: {exc}",
+            guidance="Provide a valid scope (or omit for default). Re-issue the call after fixing the payload.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
 
-    user_id = hud_resolve_user_id(request, payload=payload)
     try:
         projection_bundle = hud_effective_projection_mode(
             request, store=store, user_id=user_id, payload=payload
         )
     except ValueError as exc:
-        return web.json_response(
-            hud_error_payload(
-                str(exc),
-                "validation_error",
-                "invalid_payload",
-                route=route,
-                actor=actor,
-            ),
-            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
         )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.ingest",
+            violation=f"invalid projection_mode: {exc}",
+            guidance="Use 'dry_run', 'live', or omit (defaults to dry_run or stored preference).",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
     except sqlite3.DatabaseError as exc:
         return hud_store_error_response(route=route, actor=actor, exc=exc)
     except Exception as exc:
@@ -297,22 +435,30 @@ async def execute_hud_ingest(
         try:
             internal_id = validate_hud_id(internal_id)
         except ValueError as exc:
-            return web.json_response(
-                hud_error_payload(
-                    str(exc),
-                    "validation_error",
-                    "invalid_payload",
-                    route=route,
-                    actor=actor,
-                ),
-                status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+            err = hud_error_payload(
+                str(exc),
+                "validation_error",
+                "invalid_payload",
+                route=route,
+                actor=actor,
             )
+            err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+                current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+                tool="hud.ingest",
+                violation=f"invalid item_id / internal_id: {exc}",
+                guidance="item_id must be a valid identifier (hex) or omitted (we will generate one).",
+            )
+            return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
     else:
         internal_id = uuid.uuid4().hex
 
     ingest_payload = hud_apply_user_onboarding_context(
         dict(payload), store=store, user_id=user_id
     )
+    auto_approve_push = hud_ingest_auto_approve_push(store, user_id, projection_mode)
+    queue_explicit = _ingest_explicit_requires_approval(ingest_payload)
+    if auto_approve_push and not queue_explicit:
+        ingest_payload["requires_approval"] = False
     onboarding_needed = bool(ingest_payload.get("onboarding_needed"))
     onboarding_needed_reason = ingest_payload.get("onboarding_needed_reason")
     idempotency_key = ingest_payload.get("idempotency", ingest_payload.get("idempotency_key"))
@@ -328,7 +474,17 @@ async def execute_hud_ingest(
         projection_mode=projection_mode,
     )
     initial_status = "pending_approval" if projection.get("requires_approval") else "queued"
+    if auto_approve_push and not queue_explicit:
+        initial_status = "approved"
     if initial_status == "pending_approval":
+        classification, projection = hud_classify_project_pair(
+            workers,
+            ingest_payload,
+            intent=ingest_intent,
+            status=initial_status,
+            projection_mode=projection_mode,
+        )
+    elif initial_status == "approved":
         classification, projection = hud_classify_project_pair(
             workers,
             ingest_payload,
@@ -401,6 +557,27 @@ async def execute_hud_ingest(
             reason=reason,
         )
 
+    # Google projection: deferred on ingest unless push-without-approval (Pattern B)
+    resolved_google_target = (
+        classification.get("google_target")
+        or item.get("google_target")
+        or ""
+    )
+    google_projection = await hud_resolve_google_projection_for_ingest(
+        hub,
+        item=item,
+        actor=actor,
+        google_target=str(resolved_google_target),
+        item_status=item.get("status") or initial_status,
+        projection_mode=projection_mode,
+        auto_approve_push=auto_approve_push,
+    )
+
+
+    if google_projection is not None:
+        adapter_projection = dict(adapter_projection)
+        adapter_projection["external_dispatch"] = google_projection
+
     ingest_data = finalize_hud_data(
         {
             "item": item,
@@ -413,6 +590,12 @@ async def execute_hud_ingest(
         },
         store=store,
         user_id=user_id,
+    )
+    ingest_data["mcp_meta"] = build_ingest_mcp_meta(
+        store,
+        user_id,
+        google_target=str(classification.get("google_target") or item.get("google_target") or ""),
+        semantic_type=str(classification.get("semantic_type") or item.get("semantic_type") or ""),
     )
     return web.json_response(
         hud_success_payload(
@@ -444,16 +627,20 @@ async def execute_hud_project_approve_reject(
             request, store=store, user_id=user_id, payload=params
         )
     except ValueError as exc:
-        return web.json_response(
-            hud_error_payload(
-                str(exc),
-                "validation_error",
-                "invalid_payload",
-                route=route,
-                actor=actor,
-            ),
-            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
         )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid projection_mode: {exc}",
+            guidance="Use 'dry_run', 'live', or omit.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
     except sqlite3.DatabaseError as exc:
         return hud_store_error_response(route=route, actor=actor, exc=exc)
     except Exception as exc:
@@ -462,29 +649,37 @@ async def execute_hud_project_approve_reject(
     projection_mode = projection_bundle["effective_projection_mode"]
     item_id = params.get("item_id") or params.get("internal_id")
     if item_id is None or (isinstance(item_id, str) and not item_id.strip()):
-        return web.json_response(
-            hud_error_payload(
-                "item_id is required for approve/reject action via hud.project",
-                "validation_error",
-                "invalid_payload",
-                route=route,
-                actor=actor,
-            ),
-            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        err = hud_error_payload(
+            "item_id is required for approve/reject action via hud.project",
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
         )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation="missing item_id for approve/reject",
+            guidance="Provide the item_id (or internal_id) of a previously ingested item. Use hud.brief to discover pending items if needed.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
     try:
         item_id = validate_hud_id(str(item_id))
     except ValueError as exc:
-        return web.json_response(
-            hud_error_payload(
-                str(exc),
-                "validation_error",
-                "invalid_item_id",
-                route=route,
-                actor=actor,
-            ),
-            status=HUD_ERROR_HTTP_STATUS["invalid_item_id"],
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_item_id",
+            route=route,
+            actor=actor,
         )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid item_id: {exc}",
+            guidance="item_id must be a valid hex id returned by a prior hud.ingest or hud.brief.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_item_id"])
 
     try:
         item = store.get_item(item_id)
@@ -535,16 +730,20 @@ async def execute_hud_project_approve_reject(
             reviewed_by=actor,
         )
     except ValueError as exc:
-        return web.json_response(
-            hud_error_payload(
-                str(exc),
-                "validation_error",
-                "invalid_status_transition",
-                route=route,
-                actor=actor,
-            ),
-            status=HUD_ERROR_HTTP_STATUS["validation_error"],
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_status_transition",
+            route=route,
+            actor=actor,
         )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid status transition: {exc}",
+            guidance="Only approved/rejected transitions from queued/pending_approval are allowed via the action. Check current item status via hud.brief first.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["validation_error"])
     except sqlite3.DatabaseError as exc:
         return hud_store_error_response(route=route, actor=actor, exc=exc)
     except Exception as exc:
@@ -609,6 +808,17 @@ async def execute_hud_project_approve_reject(
             reason=reason,
         )
 
+    # Secondary Google projection dispatch
+    google_projection = await _hud_google_projection_dispatch(
+        hub, item, actor, target_status,
+        projection_mode=projection_mode,
+    )
+
+
+    if google_projection is not None:
+        adapter_projection = dict(adapter_projection)
+        adapter_projection["external_dispatch"] = google_projection
+
     approve_data = finalize_hud_data(
         {
             "item": item,
@@ -646,16 +856,20 @@ async def execute_hud_project_default(
             request, store=store, user_id=user_id, payload=params
         )
     except ValueError as exc:
-        return web.json_response(
-            hud_error_payload(
-                str(exc),
-                "validation_error",
-                "invalid_payload",
-                route=route,
-                actor=actor,
-            ),
-            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
         )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid projection_mode: {exc}",
+            guidance="Use 'dry_run', 'live', or omit.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
     except sqlite3.DatabaseError as exc:
         return hud_store_error_response(route=route, actor=actor, exc=exc)
     except Exception as exc:

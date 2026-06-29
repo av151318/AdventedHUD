@@ -11,12 +11,12 @@ _MINIMAL_VALID_SOUL_MD = """## My Mission Statement
 
 Build with intention.
 
-## Part 12 Roles
+## Roles Matrix
 | Role Slug | Role Name | Brief Description |
 | --- | --- | --- |
 | owner | Owner | Lead |
 
-## Part 13 Goals Per Role
+## Goals Matrix
 | Role | Goal | Done |
 | --- | --- | --- |
 | Owner | Ship v1 | Q1 |

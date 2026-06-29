@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Mapping, Optional
 
 from hud.onboarding import hud_soul_md_extract_roles_and_goals
@@ -138,6 +139,130 @@ def build_push_policy_status(store: HUDStore, user_id: str) -> Dict[str, Any]:
     }
 
 
+def _build_current_projection(store: HUDStore, user_id: str, days_ahead: int = 30) -> List[Dict[str, Any]]:
+    """
+    What the agent sees as "already committed" in the near term.
+    This powers intelligent conflict detection and seamless projection when
+    push-without-approval is enabled.
+    Only returns items that have moved past classification into projection states.
+    """
+    try:
+        items = store.list_items(limit=300)
+    except Exception:
+        return []
+
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=days_ahead)
+
+    upcoming = []
+    for item in items:
+        due_str = item.get("due") or item.get("scheduled_for") or item.get("date")
+        if not due_str:
+            continue
+        try:
+            due = datetime.fromisoformat(str(due_str).replace("Z", "+00:00"))
+            if due > cutoff:
+                continue
+
+            status = item.get("status", "")
+            # These are the states where something is actually going to external systems
+            if status not in ("approved", "queued", "pending", "synced"):
+                continue
+
+            upcoming.append({
+                "id": item.get("id"),
+                "role": item.get("role_ref") or item.get("role"),
+                "title": item.get("title") or item.get("summary"),
+                "type": item.get("semantic_type") or "todo",
+                "due": due_str,
+                "status": status,
+                "priority": item.get("priority_class"),
+            })
+        except Exception:
+            continue
+
+    upcoming.sort(key=lambda x: x.get("due", ""))
+    return upcoming[:50]
+
+
+def _build_google_context(hub: Optional["HUDAdapterHub"] = None) -> Dict[str, Any]:
+    """
+    Real Google surface data for the agent.
+    When hub is provided, we try to get actual task lists and calendars from the adapters.
+    This enables the agent to have awareness and use defaults intelligently.
+    """
+    if hub is None:
+        return {
+            "task_lists": [],
+            "calendars": [],
+            "default_task_list": "@default",
+            "primary_calendar": "primary",
+            "has_connected_google": False,
+        }
+
+    # Try to get real data from the adapters
+    try:
+        gtasks = hub.adapters.get("gtasks")
+        gcal = hub.adapters.get("gcal")
+
+        task_lists = []
+        if gtasks and hasattr(gtasks, "list_task_lists"):
+            res = gtasks.list_task_lists()
+            task_lists = res.get("task_lists", []) if isinstance(res, dict) else []
+
+        calendars = []
+        if gcal and hasattr(gcal, "list_calendars"):
+            res = gcal.list_calendars()
+            calendars = res.get("calendars", []) if isinstance(res, dict) else []
+
+        return {
+            "task_lists": task_lists,
+            "calendars": calendars,
+            "default_task_list": "@default",
+            "primary_calendar": "primary",
+            "has_connected_google": bool(task_lists or calendars),
+        }
+    except Exception:
+        return {
+            "task_lists": [],
+            "calendars": [],
+            "default_task_list": "@default",
+            "primary_calendar": "primary",
+            "has_connected_google": False,
+        }
+
+
+def _compute_date_context() -> Dict[str, str]:
+    """Server-side date awareness for the agent (mandatory for reliable projection).
+
+    Never rely on the LLM to guess "next Friday" or similar.
+    All dates are computed from the container's clock.
+    """
+    now = datetime.now(timezone.utc)
+    today = now.date()
+    today_iso = today.isoformat()
+
+    def _next_weekday(target_weekday: int) -> str:
+        # 0=Mon ... 6=Sun
+        days_ahead = target_weekday - today.weekday()
+        if days_ahead <= 0:
+            days_ahead += 7
+        return (today + timedelta(days=days_ahead)).isoformat()
+
+    def _end_of_week(offset_weeks: int = 0) -> str:
+        days_until_sunday = 6 - today.weekday()
+        return (today + timedelta(days=days_until_sunday + (offset_weeks * 7))).isoformat()
+
+    return {
+        "today": today_iso,
+        "today_iso": now.isoformat(),
+        "next_monday": _next_weekday(0),
+        "next_friday": _next_weekday(4),
+        "end_of_this_week": _end_of_week(0),
+        "end_of_next_week": _end_of_week(1),
+    }
+
+
 def build_classification_context(
     store: HUDStore,
     user_id: str,
@@ -145,6 +270,7 @@ def build_classification_context(
     *,
     classification: Mapping[str, Any],
     projection: Mapping[str, Any],
+    hub: Optional["HUDAdapterHub"] = None,   # passed so we can populate real google_context
 ) -> Dict[str, Any]:
     extracted = hud_soul_md_extract_roles_and_goals(soul_content)
     matrix_guidance = build_decision_matrix_guidance_alias()
@@ -160,4 +286,7 @@ def build_classification_context(
         "push_policy": build_push_policy_status(store, user_id),
         "classification": dict(classification),
         "projection": dict(projection),
+        "dates": _compute_date_context(),   # Server-computed date anchors (mandatory for the agent)
+        "current_projection": _build_current_projection(store, user_id),  # What is already projected — lets agent detect conflicts intelligently
+        "google_context": _build_google_context(hub=hub),  # Real lists/calendars when hub is provided
     }

@@ -30,6 +30,10 @@ HUD_ROUTE_SYNC_STATUS = "/hud/sync_status"
 HUD_ROUTE_STATUS_COMPAT = "/hud/status"
 HUD_ROUTE_MCP = "/hud/mcp"
 HUD_ROUTE_ONBOARDING_SOUL = "/hud/onboarding/soul"
+HUD_ROUTE_ONBOARDING_READ = "/hud/onboarding/read"
+HUD_ROUTE_ONBOARDING_WRITE_SOUL = "/hud/onboarding/write_soul"
+HUD_ROUTE_ONBOARDING_SET_ATOMIC = "/hud/onboarding/set_atomic"
+HUD_ROUTE_ONBOARDING_SET_PUSH = "/hud/onboarding/set_push"
 
 HUD_ROUTE_PUSH_POLICY = "/hud/push_policy"
 
@@ -44,12 +48,16 @@ HUD_PROJECTION_MODE_DIRECT_ALIASES = frozenset({"direct"})
 HUD_VALID_PROJECTION_MODES = frozenset({HUD_PROJECTION_MODE_DRY_RUN, HUD_PROJECTION_MODE_LIVE})
 HUD_DEFAULT_PROJECTION_MODE = HUD_PROJECTION_MODE_DRY_RUN
 
-# v1.4: hud.onboarding accepts atomic roles/goals or returns [MCP RITUAL MODE - STRICT PROCEDURE] rejection
+# v1.4.1: decomposed narrow MCP onboarding methods (read/write_soul/set_atomic/set_push). Legacy "hud.onboarding" kept as shim only.
 HUD_MCP_METHODS = {
     "hud.ingest": HUD_INTENT_INGEST,
     "hud.brief": HUD_INTENT_BRIEF,
     "hud.project": HUD_INTENT_PROJECT,
     "hud.onboarding": HUD_INTENT_ONBOARDING,
+    "hud.onboarding.read": HUD_INTENT_ONBOARDING,
+    "hud.onboarding.write_soul": HUD_INTENT_ONBOARDING,
+    "hud.onboarding.set_atomic": HUD_INTENT_ONBOARDING,
+    "hud.onboarding.set_push": HUD_INTENT_ONBOARDING,
     "hud.mcp": HUD_INTENT_MCP,
 }
 
