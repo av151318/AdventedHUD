@@ -42,6 +42,8 @@ from hud.ingest_project import (
     execute_hud_ingest,
     execute_hud_project_approve_reject,
     execute_hud_project_default,
+    execute_hud_project_retract,
+    execute_hud_project_update,
 )
 from hud.onboarding import hud_onboarding_dispatch_response, hud_onboarding_soul_read_response, hud_onboarding_soul_build_response, hud_soul_md_path
 from hud.onboarding_db import hud_onboarding_db_status
@@ -188,7 +190,7 @@ async def handle_mcp(request: web.Request) -> web.Response:
 
     if route_intent == HUD_INTENT_PROJECT:
         action = str(params.get("action") or params.get("fate") or "project").strip().lower()
-        if action not in ("project", "approve", "reject"):
+        if action not in ("project", "approve", "reject", "retract", "update"):
             action = "project"
         if action in ("approve", "reject"):
             return await execute_hud_project_approve_reject(
@@ -198,6 +200,28 @@ async def handle_mcp(request: web.Request) -> web.Response:
                 hub=hub,
                 params=params,
                 action=action,
+                route=HUD_ROUTE_MCP,
+                actor=actor,
+                route_meta=hud_route_meta(workers, action, method=method, jsonrpc=jsonrpc),
+            )
+        if action == "retract":
+            return await execute_hud_project_retract(
+                request,
+                store=store,
+                workers=workers,
+                hub=hub,
+                params=params,
+                route=HUD_ROUTE_MCP,
+                actor=actor,
+                route_meta=hud_route_meta(workers, action, method=method, jsonrpc=jsonrpc),
+            )
+        if action == "update":
+            return await execute_hud_project_update(
+                request,
+                store=store,
+                workers=workers,
+                hub=hub,
+                params=params,
                 route=HUD_ROUTE_MCP,
                 actor=actor,
                 route_meta=hud_route_meta(workers, action, method=method, jsonrpc=jsonrpc),

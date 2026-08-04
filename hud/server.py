@@ -127,9 +127,9 @@ OPENAPI_SPEC = {
         },
         "/hud/project": {
             "post": {
-                "summary": "Project / approve / reject structured items",
+                "summary": "Project / approve / reject / retract / update structured items",
                 "operationId": "hud_project",
-                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"item_id": {"type": "string", "description": "HUD item identifier from hud.ingest or hud.brief"}, "action": {"type": "string", "enum": ["project", "approve", "reject"], "description": "approve=approve pending item, reject=deny it, project=generic upsert"}, "fate": {"type": "string", "enum": ["project", "approve", "reject"], "description": "Alias for action"}, "projection_mode": {"type": "string", "enum": ["live", "dry_run"], "description": "Override projection mode"}}}}}},
+                "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {"item_id": {"type": "string", "description": "HUD item identifier from hud.ingest or hud.brief"}, "action": {"type": "string", "enum": ["project", "approve", "reject", "retract", "update"], "description": "approve=approve pending item, reject=deny a non-projected item, retract=delete a projected item's live Google/Obsidian projection, update=patch a projected item in place, project=generic upsert"}, "fate": {"type": "string", "enum": ["project", "approve", "reject", "retract", "update"], "description": "Alias for action"}, "projection_mode": {"type": "string", "enum": ["live", "dry_run"], "description": "Override projection mode"}, "title": {"type": "string", "description": "update: new title"}, "summary": {"type": "string", "description": "update: new calendar summary"}, "content": {"type": "string", "description": "update: new content/body"}, "start": {"$ref": "#/components/schemas/CalendarEventTime", "description": "update: new event start"}, "end": {"$ref": "#/components/schemas/CalendarEventTime", "description": "update: new event end"}, "due": {"type": "string", "description": "update: new task due date"}}}}}},
                 "responses": {"200": {"description": "Project result"}}
             }
         },

@@ -998,10 +998,18 @@ class BaseHUDAdapter:
         return {"status": "blocked", "code": "write_disabled", "message": f"{self.adapter_name} write disabled in v1 for action={action}"}
 
 
+def _obsidian_vault_root() -> Path:
+    """Resolve the Obsidian AdventedHUD vault root (overridable for tests)."""
+    env_root = os.environ.get("HUD_OBSIDIAN_VAULT_ROOT")
+    if env_root:
+        return Path(env_root).expanduser()
+    return Path(__file__).resolve().parents[3] / "data" / "obsidian" / "AdventedHUD"
+
+
 class ObsidianAdapter(BaseHUDAdapter):
     adapter_name = "obsidian"
     source_type = "obsidian"
-    placeholder_endpoints = {"roles": "v1://adapters/obsidian/roles", "goals": "v1://adapters/obsidian/goals", "matrix": "v1://adapters/obsidian/matrix", "upsert": "v1://adapters/obsidian/item", "sync": "v1://adapters/obsidian/sync"}
+    placeholder_endpoints = {"roles": "v1://adapters/obsidian/roles", "goals": "v1://adapters/obsidian/goals", "matrix": "v1://adapters/obsidian/matrix", "upsert": "v1://adapters/obsidian/item", "delete": "v1://adapters/obsidian/item", "sync": "v1://adapters/obsidian/sync"}
     status_map = {**_GLOBAL_STATUS_MAP, "open": "pending", "active": "queued", "stale": "failed"}
     _SEEDS = {"roles": ({"id": "role:owner", "name": "owner", "matrix": "matrix:core"}, {"id": "role:editor", "name": "editor", "matrix": "matrix:core"}), "goals": ({"id": "goal:ship", "name": "ship", "state": "active"},), "matrix": ({"id": "matrix:core", "name": "core", "description": "primary"}, {"id": "matrix:review", "name": "review", "description": "quality"})}
 
@@ -1021,7 +1029,7 @@ class ObsidianAdapter(BaseHUDAdapter):
                 "record": record,
             }
 
-        vault_root = Path(__file__).resolve().parents[3] / "data" / "obsidian" / "AdventedHUD"
+        vault_root = _obsidian_vault_root()
         folder_hint = _safe_fragment(normalized.get("folder") or normalized.get("directory") or record.get("scope"), allow_path=True)
         path_hint = _safe_fragment(normalized.get("file_path") or normalized.get("path") or normalized.get("relative_path"), allow_path=True)
         filename = _safe_fragment(normalized.get("filename") or normalized.get("file_name") or normalized.get("name"), allow_path=False)
@@ -1072,6 +1080,120 @@ class ObsidianAdapter(BaseHUDAdapter):
         except (OSError, TypeError, ValueError) as exc:
             return {**self._write_blocked(action="obsidian.upsert"), "mode": "write_error", "adapter": self.adapter_name, "endpoint": self.endpoints.get("upsert"), "record": record, "write_status": "failed", "error": str(exc), "path_hint": path_hint, "relative_path": relative_path}
 
+    async def delete_item(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
+        """Delete (or archive) an Obsidian note using its stored path.
+
+        The stored ``relative_path`` is repo-root relative (e.g.
+        ``data/obsidian/AdventedHUD/inbox/foo.md``). By default the note is
+        moved to ``<vault>/_trash/...`` (reversible archive); pass
+        ``archive: false`` to hard-delete. Already-missing notes are reported
+        as ``already_gone`` (idempotent).
+        """
+        normalized = _unwrap_payload_value(_coerce_payload(payload))
+        record = await self.to_internal_record(normalized, intent="delete")
+        if not self.allow_writes:
+            return {**self._write_blocked(action="obsidian.delete"), "mode": "write_guard", "adapter": self.adapter_name, "endpoint": self.endpoints.get("delete"), "record": record}
+
+        vault_root = _obsidian_vault_root()
+        repo_root = Path(__file__).resolve().parents[3]
+        path_hint = _safe_fragment(
+            normalized.get("relative_path")
+            or normalized.get("file_path")
+            or normalized.get("path")
+            or normalized.get("note_path"),
+            allow_path=True,
+        )
+        if not path_hint:
+            return {
+                "status": "error",
+                "code": "missing_path",
+                "message": "obsidian.delete requires relative_path or file_path",
+                "mode": "delete",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+            }
+
+        vault_root_str = str(vault_root)
+        candidate = None
+        if path_hint:
+            repo_candidate = (repo_root / path_hint).resolve()
+            if str(repo_candidate) == vault_root_str or str(repo_candidate).startswith(vault_root_str + os.sep):
+                candidate = repo_candidate
+            else:
+                vault_candidate = (vault_root / path_hint).resolve()
+                if str(vault_candidate) == vault_root_str or str(vault_candidate).startswith(vault_root_str + os.sep):
+                    candidate = vault_candidate
+        if candidate is None:
+            return {
+                **self._write_blocked(action="obsidian.delete"),
+                "mode": "write_guard",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+                "write_status": "blocked",
+                "path_hint": path_hint,
+                "message": "refusing to delete a note outside the AdventedHUD vault",
+            }
+
+        if not candidate.is_file():
+            return {
+                "status": "ok",
+                "mode": "delete",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+                "write_status": "already_gone",
+                "file_path": str(candidate),
+                "relative_path": path_hint,
+            }
+
+        raw_archive = _as_text(normalized.get("archive"), default=None)
+        archive_note = raw_archive is None or raw_archive.strip().lower() not in {"0", "false", "no", "off"}
+        try:
+            if archive_note:
+                archive_dir = (vault_root / "_trash" / Path(path_hint).parent).resolve()
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                archive_target = archive_dir / Path(path_hint).name
+                archive_target.write_text(candidate.read_text(encoding="utf-8"), encoding="utf-8")
+                candidate.unlink()
+                return {
+                    "status": "ok",
+                    "mode": "delete",
+                    "adapter": self.adapter_name,
+                    "endpoint": self.endpoints.get("delete"),
+                    "record": record,
+                    "write_status": "archived",
+                    "file_path": str(candidate),
+                    "relative_path": path_hint,
+                    "archive_path": str(archive_target),
+                }
+            candidate.unlink()
+            return {
+                "status": "ok",
+                "mode": "delete",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+                "write_status": "deleted",
+                "file_path": str(candidate),
+                "relative_path": path_hint,
+            }
+        except OSError as exc:
+            return {
+                "status": "error",
+                "code": "delete_failed",
+                "message": f"obsidian.delete failed: {exc}",
+                "mode": "delete",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+                "write_status": "failed",
+                "error": str(exc),
+                "path_hint": path_hint,
+                "relative_path": path_hint,
+            }
+
     async def sync_state(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
         kind = _as_text(_coerce_payload(payload).get("kind"), default="roles").strip().lower()
         if kind in self._SEEDS:
@@ -1095,7 +1217,7 @@ class ObsidianAdapter(BaseHUDAdapter):
 class GoogleCalendarAdapter(BaseHUDAdapter):
     adapter_name = "gcal"
     source_type = "google_calendar"
-    placeholder_endpoints = {"events": "v1://adapters/google-calendar/events", "upsert": "v1://adapters/google-calendar/upsert", "sync": "v1://adapters/google-calendar/sync"}
+    placeholder_endpoints = {"events": "v1://adapters/google-calendar/events", "upsert": "v1://adapters/google-calendar/upsert", "delete": "v1://adapters/google-calendar/events", "sync": "v1://adapters/google-calendar/sync"}
     status_map = {**_GLOBAL_STATUS_MAP, "confirmed": "approved", "tentative": "queued", "needsAction": "pending", "accepted": "approved", "declined": "rejected", "cancelled": "rejected"}
     _EVENT_SEED = ({"event_id": "evt:standup", "title": "Standup", "calendar": "primary", "status": "confirmed"}, {"event_id": "evt:shipping", "title": "Shipping", "calendar": "primary", "status": "tentative"})
 
@@ -1132,7 +1254,7 @@ class GoogleCalendarAdapter(BaseHUDAdapter):
             return {"calendars": [], "error": str(e)}
 
     async def upsert_item(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
-        normalized = _coerce_payload(payload)
+        normalized = _unwrap_payload_value(_coerce_payload(payload))
         oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
         if oauth_metadata is None:
             return _google_oauth_config_missing_error(adapter_name=self.adapter_name, action="gcal.upsert")
@@ -1264,6 +1386,109 @@ class GoogleCalendarAdapter(BaseHUDAdapter):
             "event": _google_calendar_item_from_api(response_body, calendar_id=_as_text(calendar_id, default="primary")),
         }
 
+    async def delete_item(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
+        """Delete a Google Calendar event by its stored external id.
+
+        Requires ``event_id`` / ``external_id`` / ``google_id`` (from the
+        original upsert write-back) and ``calendar_id``. A 404 from Google is
+        treated as ``already_gone`` (idempotent success).
+        """
+        normalized = _unwrap_payload_value(_coerce_payload(payload))
+        oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
+        if oauth_metadata is None:
+            return _google_oauth_config_missing_error(adapter_name=self.adapter_name, action="gcal.delete")
+        token_context = _resolve_google_token_context(normalized, oauth_metadata_path=oauth_path)
+        token_payload = token_context.get("token")
+        token_state = _google_oauth_token_state(
+            _normalize_google_token_payload(token_payload) if isinstance(token_payload, Mapping) else None,
+            token_source=_as_text(token_context.get("source"), default="missing"),
+        )
+        metadata_response = _google_oauth_metadata_with_token_state(oauth_metadata, token_state)
+        record = await self.to_internal_record(_sanitize_google_payload(normalized), intent="delete")
+        if not self.allow_writes:
+            return {
+                **self._write_blocked(action="google_calendar.delete"),
+                "mode": "write_guard",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+                "metadata": metadata_response,
+            }
+
+        event_id = _as_text(
+            normalized.get("event_id")
+            or normalized.get("external_id")
+            or normalized.get("google_id")
+        )
+        if event_id is None:
+            return {
+                "status": "error",
+                "code": "missing_external_id",
+                "message": "gcal.delete requires event_id/external_id (stored from the original projection)",
+                "mode": "delete",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+                "metadata": metadata_response,
+            }
+        calendar_id = _as_text(normalized.get("calendar_id"), default="primary")
+
+        access_token, _, resolved_token_state, access_error = _google_ensure_access_token(
+            adapter_name=self.adapter_name,
+            action="gcal.delete",
+            metadata=oauth_metadata,
+            token_context=token_context,
+        )
+        metadata_response = _google_oauth_metadata_with_token_state(oauth_metadata, resolved_token_state)
+        if access_error is not None:
+            if _as_text(access_error.get("code"), default="error") == "config_missing":
+                return _google_oauth_config_missing_error(adapter_name=self.adapter_name, action="gcal.delete")
+            return _google_api_error_payload(self.adapter_name, "gcal.delete", metadata=oauth_metadata, token_state=resolved_token_state, details=access_error)
+        if access_token is None:
+            return _google_api_error_payload(self.adapter_name, "gcal.delete", metadata=oauth_metadata, token_state=resolved_token_state, details={"code": "auth_required", "message": "No access token available"})
+
+        encoded_calendar_id = urllib.parse.quote(_as_text(calendar_id, default="primary"), safe="")
+        request_url = f"https://www.googleapis.com/calendar/v3/calendars/{encoded_calendar_id}/events/{urllib.parse.quote(event_id, safe='')}"
+        response_body, api_error, resolved_token_state = _google_api_request_json_with_refresh(
+            method="DELETE",
+            url=request_url,
+            metadata=oauth_metadata,
+            token_context=token_context,
+            token_state=resolved_token_state,
+            adapter_name=self.adapter_name,
+            action="gcal.delete",
+            access_token=access_token,
+        )
+        metadata_response = _google_oauth_metadata_with_token_state(oauth_metadata, resolved_token_state)
+        if api_error is not None:
+            if str(api_error.get("code")) == "404":
+                return {
+                    "status": "ok",
+                    "mode": "delete",
+                    "adapter": self.adapter_name,
+                    "endpoint": self.endpoints.get("delete"),
+                    "record": record,
+                    "metadata": metadata_response,
+                    "write_status": "already_gone",
+                    "external_id": event_id,
+                    "google_id": event_id,
+                    "calendar_id": _as_text(calendar_id, default="primary"),
+                }
+            return _google_api_error_payload(self.adapter_name, "gcal.delete", metadata=oauth_metadata, token_state=resolved_token_state, details=api_error)
+
+        return {
+            "status": "ok",
+            "mode": "delete",
+            "adapter": self.adapter_name,
+            "endpoint": self.endpoints.get("delete"),
+            "record": record,
+            "metadata": metadata_response,
+            "write_status": "deleted",
+            "external_id": event_id,
+            "google_id": event_id,
+            "calendar_id": _as_text(calendar_id, default="primary"),
+        }
+
     async def sync_state(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
         normalized = _coerce_payload(payload)
         oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
@@ -1352,7 +1577,7 @@ class GoogleCalendarAdapter(BaseHUDAdapter):
 class GoogleTasksAdapter(BaseHUDAdapter):
     adapter_name = "gtasks"
     source_type = "google_tasks"
-    placeholder_endpoints = {"tasks": "v1://adapters/google-tasks/tasks", "upsert": "v1://adapters/google-tasks/upsert", "sync": "v1://adapters/google-tasks/sync"}
+    placeholder_endpoints = {"tasks": "v1://adapters/google-tasks/tasks", "upsert": "v1://adapters/google-tasks/upsert", "delete": "v1://adapters/google-tasks/tasks", "sync": "v1://adapters/google-tasks/sync"}
     status_map = {**_GLOBAL_STATUS_MAP, "needsAction": "pending", "needs_action": "pending", "in_progress": "pending", "completed": "approved"}
     _TASK_SEED = ({"task_id": "task:seed-1", "title": "Review architecture doc", "status": "needsAction"}, {"task_id": "task:seed-2", "title": "Finish test harness", "status": "completed"})
 
@@ -1389,7 +1614,7 @@ class GoogleTasksAdapter(BaseHUDAdapter):
             return {"task_lists": [], "error": str(e)}
 
     async def upsert_item(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
-        normalized = _coerce_payload(payload)
+        normalized = _unwrap_payload_value(_coerce_payload(payload))
         oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
         if oauth_metadata is None:
             return _google_oauth_config_missing_error(adapter_name=self.adapter_name, action="gtasks.upsert")
@@ -1485,6 +1710,110 @@ class GoogleTasksAdapter(BaseHUDAdapter):
             "google_id": external_id,
             "tasklist_id": _as_text(tasklist_id, default="@default"),
         }
+
+    async def delete_item(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
+        """Delete a Google Task by its stored external id.
+
+        Requires ``task_id`` / ``external_id`` / ``google_id`` (from the
+        original upsert write-back) and ``tasklist_id``. A 404 from Google is
+        treated as ``already_gone`` (idempotent success).
+        """
+        normalized = _unwrap_payload_value(_coerce_payload(payload))
+        oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
+        if oauth_metadata is None:
+            return _google_oauth_config_missing_error(adapter_name=self.adapter_name, action="gtasks.delete")
+        token_context = _resolve_google_token_context(normalized, oauth_metadata_path=oauth_path)
+        token_payload = token_context.get("token")
+        token_state = _google_oauth_token_state(
+            _normalize_google_token_payload(token_payload) if isinstance(token_payload, Mapping) else None,
+            token_source=_as_text(token_context.get("source"), default="missing"),
+        )
+        metadata_response = _google_oauth_metadata_with_token_state(oauth_metadata, token_state)
+        record = await self.to_internal_record(_sanitize_google_payload(normalized), intent="delete")
+        if not self.allow_writes:
+            return {
+                **self._write_blocked(action="google_tasks.delete"),
+                "mode": "write_guard",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+                "metadata": metadata_response,
+            }
+
+        task_id = _as_text(
+            normalized.get("task_id")
+            or normalized.get("external_id")
+            or normalized.get("google_id")
+        )
+        if task_id is None:
+            return {
+                "status": "error",
+                "code": "missing_external_id",
+                "message": "gtasks.delete requires task_id/external_id (stored from the original projection)",
+                "mode": "delete",
+                "adapter": self.adapter_name,
+                "endpoint": self.endpoints.get("delete"),
+                "record": record,
+                "metadata": metadata_response,
+            }
+        tasklist_id = _as_text(normalized.get("tasklist_id"), default="@default")
+
+        access_token, _, resolved_token_state, access_error = _google_ensure_access_token(
+            adapter_name=self.adapter_name,
+            action="gtasks.delete",
+            metadata=oauth_metadata,
+            token_context=token_context,
+        )
+        metadata_response = _google_oauth_metadata_with_token_state(oauth_metadata, resolved_token_state)
+        if access_error is not None:
+            if _as_text(access_error.get("code"), default="error") == "config_missing":
+                return _google_oauth_config_missing_error(adapter_name=self.adapter_name, action="gtasks.delete")
+            return _google_api_error_payload(self.adapter_name, "gtasks.delete", metadata=oauth_metadata, token_state=resolved_token_state, details=access_error)
+        if access_token is None:
+            return _google_api_error_payload(self.adapter_name, "gtasks.delete", metadata=oauth_metadata, token_state=resolved_token_state, details={"code": "auth_required", "message": "No access token available"})
+
+        encoded_tasklist_id = urllib.parse.quote(_as_text(tasklist_id, default="@default"), safe="")
+        request_url = f"https://www.googleapis.com/tasks/v1/lists/{encoded_tasklist_id}/tasks/{urllib.parse.quote(task_id, safe='')}"
+        response_body, api_error, resolved_token_state = _google_api_request_json_with_refresh(
+            method="DELETE",
+            url=request_url,
+            metadata=oauth_metadata,
+            token_context=token_context,
+            token_state=resolved_token_state,
+            adapter_name=self.adapter_name,
+            action="gtasks.delete",
+            access_token=access_token,
+        )
+        metadata_response = _google_oauth_metadata_with_token_state(oauth_metadata, resolved_token_state)
+        if api_error is not None:
+            if str(api_error.get("code")) == "404":
+                return {
+                    "status": "ok",
+                    "mode": "delete",
+                    "adapter": self.adapter_name,
+                    "endpoint": self.endpoints.get("delete"),
+                    "record": record,
+                    "metadata": metadata_response,
+                    "write_status": "already_gone",
+                    "external_id": task_id,
+                    "google_id": task_id,
+                    "tasklist_id": _as_text(tasklist_id, default="@default"),
+                }
+            return _google_api_error_payload(self.adapter_name, "gtasks.delete", metadata=oauth_metadata, token_state=resolved_token_state, details=api_error)
+
+        return {
+            "status": "ok",
+            "mode": "delete",
+            "adapter": self.adapter_name,
+            "endpoint": self.endpoints.get("delete"),
+            "record": record,
+            "metadata": metadata_response,
+            "write_status": "deleted",
+            "external_id": task_id,
+            "google_id": task_id,
+            "tasklist_id": _as_text(tasklist_id, default="@default"),
+        }
+
     async def sync_state(self, payload: Optional[Mapping[str, Any]] = None) -> HUDStoreRecord:
         normalized = _coerce_payload(payload)
         oauth_metadata, oauth_path = _resolve_google_oauth_metadata_with_details(normalized)
@@ -1571,12 +1900,17 @@ class HUDAdapterHub:
         "event": ("gcal", "sync_state", {"kind": "events"}),
         "gcal.upsert": ("gcal", "upsert_item", {}),
         "gcal.sync": ("gcal", "sync_state", {"kind": "events"}),
+        "gcal.delete": ("gcal", "delete_item", {}),
         "calendar.upsert": ("gcal", "upsert_item", {}),
         "calendar.sync": ("gcal", "sync_state", {"kind": "events"}),
+        "calendar.delete": ("gcal", "delete_item", {}),
         "tasks": ("gtasks", "sync_state", {"kind": "tasks"}),
         "task": ("gtasks", "sync_state", {"kind": "tasks"}),
         "gtasks.upsert": ("gtasks", "upsert_item", {}),
         "gtasks.sync": ("gtasks", "sync_state", {"kind": "tasks"}),
+        "gtasks.delete": ("gtasks", "delete_item", {}),
+        "tasks.delete": ("gtasks", "delete_item", {}),
+        "obsidian.delete": ("obsidian", "delete_item", {}),
     }
 
     def __init__(
@@ -1616,6 +1950,8 @@ class HUDAdapterHub:
             alias = f"obsidian.{action_raw}"
             if alias in self._ACTION_ALIASES:
                 return self._ACTION_ALIASES[alias]
+            if action_raw in {"delete", "remove", "retract", "cancel"}:
+                return ("obsidian", "delete_item", {})
             if action_raw in {"read", "state"}:
                 return ("obsidian", "sync_state", {"kind": "roles"})
             if action_raw.startswith("read_"):
@@ -1629,6 +1965,8 @@ class HUDAdapterHub:
             return self._ACTION_ALIASES[alias]
         if action_raw in {"upsert", "write", "create", "update"}:
             return (provider, "upsert_item", {})
+        if action_raw in {"delete", "remove", "retract", "cancel"}:
+            return (provider, "delete_item", {})
         if action_raw in {"sync", "state", "read"}:
             return (provider, "sync_state", {"kind": "events"} if provider == "gcal" else {"kind": "tasks"})
         if action_raw in {"tasks", "events"}:

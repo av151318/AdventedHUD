@@ -72,7 +72,7 @@ The HUD MCP is **not** an orchestrator. It is a **context and projection service
    The agent calls `hud.ingest` or `hud.project` with the fully classified payload.
 
 5. **Fate Decision** (optional)  
-   Using `hud.project` with an explicit `action` (`project` | `approve` | `reject`).
+   Using `hud.project` with an explicit `action` (`project` | `approve` | `reject` | `retract` | `update`).
 
 6. **Persistence & Projection**  
    Everything is first written to Obsidian. Projection to Google only happens when the item is approved and projection mode allows it.
@@ -136,9 +136,38 @@ When `hud.brief` (default) is called, the MCP returns the user’s Roles, Goals,
 | `hud.brief` (default) | Returns roles, goals, and decision matrix for classification            | Before every classification |
 | `hud.brief` (scoped)  | Returns human-readable briefing for a time period or goal               | When user asks for a plan or review |
 | `hud.ingest`          | Accepts classified item and persists (with optional projection)         | After classification |
-| `hud.project`         | Reviews/decides fate (`project` / `approve` / `reject`) and projects    | For review or explicit approval |
+| `hud.project`         | Reviews/decides fate (`project` / `approve` / `reject` / `retract` / `update`) and projects    | For review, explicit approval, or correcting/removing a projected item |
 | `hud.onboarding`      | Reads or writes soul.md; persists atomic state to DB on write           | Initial setup, profile edits |
 | `hud.mcp`             | JSON-RPC entry point for all tools                                      | Primary surface for agents |
+
+### Post-projection fate (retract / update)
+
+Projection **permission** plus **edit** means the agent can also scrap or correct an
+item *after* it has been projected live. `hud.project` therefore supports two
+additional actions on already-projected (`approved` / `synced`) items:
+
+- **`retract`** — deletes the live projection: `DELETE` the Google Calendar event
+  (`gcal.delete`) or Google Task (`gtasks.delete`) using the stored external id,
+  and archives/removes the Obsidian note (`obsidian.delete`) using the stored path.
+  The item then moves to the terminal `retracted` status. A Google 404
+  (already gone) is treated as success; a failed external delete is reported as an
+  error and the item is **not** marked retracted.
+- **`update`** — patches the projected item in place: the Google object is `PATCH`ed
+  (never re-created, so no duplicates) using the stored external id, and the
+  Obsidian note is overwritten. The item stays `approved` / `synced`.
+
+Durable identity is written back after every successful live projection:
+`google_id` / `external_id`, `calendar_id` / `tasklist_id`, and the Obsidian
+`relative_path`. These are what make later `retract` / `update` able to target the
+exact external object. `reject` on an already-projected item returns a clear
+`use_retract` error instead of a silent noop — `reject` only gates the queue for
+non-projected items.
+
+Correction playbook:
+- Wrong date / wrong content on a live item → `retract` then re-`ingest`, **or**
+  `update` when the same external object should be corrected in place.
+- Never "reject then re-ingest" alone for a live item — that leaves the stale
+  Google/Obsidian artifact behind.
 
 ---
 

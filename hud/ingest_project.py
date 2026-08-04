@@ -56,8 +56,10 @@ from hud.workers import HUDWorkers
 
 logger = logging.getLogger(__name__)
 
-_HUD_TERMINAL_STATUSES = frozenset({"approved", "rejected", "failed", "duplicate", "synced"})
+_HUD_TERMINAL_STATUSES = frozenset({"approved", "rejected", "failed", "duplicate", "synced", "retracted"})
 _HUD_PROJECTION_DISPATCH_STATUSES = frozenset({"queued", "approved"})
+# Statuses that mean the item has been projected live to an external surface.
+_HUD_PROJECTED_STATUSES = frozenset({"approved", "synced"})
 
 
 def hud_google_target_projects_externally(google_target: Any) -> bool:
@@ -240,6 +242,12 @@ def hud_projection_payload_for_item(
         "requires_approval",
         "source_id",
         "last_synced_at",
+        "google_id",
+        "external_id",
+        "calendar_id",
+        "tasklist_id",
+        "relative_path",
+        "file_path",
     ):
         if key in item and key not in projection_payload:
             projection_payload[key] = item.get(key)
@@ -253,6 +261,72 @@ def hud_projection_payload_for_item(
         "payload": projection_payload,
         "item_id": item.get("internal_id"),
     }
+
+
+def hud_extract_projection_identity(adapter_projection: Dict[str, Any]) -> Dict[str, Any]:
+    """Extract durable external identity fields from an adapter projection result.
+
+    Adapter upserts return ``external_id`` / ``google_id`` / ``calendar_id`` /
+    ``tasklist_id`` / ``relative_path`` / ``file_path`` inside ``result``; the
+    hub wraps that under the top-level ``result`` key.
+    """
+    identity: Dict[str, Any] = {}
+    result = adapter_projection.get("result")
+    if not isinstance(result, dict):
+        return identity
+    for key in (
+        "external_id",
+        "google_id",
+        "calendar_id",
+        "tasklist_id",
+        "relative_path",
+        "file_path",
+    ):
+        value = result.get(key)
+        if value is not None and str(value).strip():
+            identity[key] = str(value).strip()
+    return identity
+
+
+def hud_persist_projection_identity(
+    store: HUDStore, item_id: str, adapter_projection: Dict[str, Any]
+) -> None:
+    """Persist external identity from a successful projection onto the item row.
+
+    This is what makes later update/retract able to target the exact Google
+    object and Obsidian note. Best-effort: never raises on persistence failure.
+    """
+    identity = hud_extract_projection_identity(adapter_projection)
+    if not identity:
+        return
+    relative_path = identity.get("relative_path")
+    if relative_path is None and identity.get("file_path"):
+        # Obsidian reports an absolute file_path; keep the repo-root-relative
+        # form for portability across host/container paths.
+        relative_path = identity["file_path"]
+    try:
+        store.update_external_identity(
+            item_id,
+            google_id=identity.get("google_id"),
+            external_id=identity.get("external_id"),
+            calendar_id=identity.get("calendar_id"),
+            tasklist_id=identity.get("tasklist_id"),
+            relative_path=relative_path,
+        )
+    except Exception:
+        logger.exception("Failed to persist projection identity item=%s", item_id)
+
+
+def hud_persist_item_projection_identity(
+    store: HUDStore, item_id: str, adapter_projection: Dict[str, Any]
+) -> None:
+    """Persist identity from the primary projection and its Google external dispatch."""
+    if not isinstance(adapter_projection, dict):
+        return
+    hud_persist_projection_identity(store, item_id, adapter_projection)
+    external_dispatch = adapter_projection.get("external_dispatch")
+    if isinstance(external_dispatch, dict):
+        hud_persist_projection_identity(store, item_id, external_dispatch)
 
 
 async def hud_dispatch_projection(
@@ -578,6 +652,10 @@ async def execute_hud_ingest(
         adapter_projection = dict(adapter_projection)
         adapter_projection["external_dispatch"] = google_projection
 
+    # Persist durable external ids (Google event/task + Obsidian path) so a
+    # later hud.project retract/update can target the exact external objects.
+    hud_persist_item_projection_identity(store, item.get("internal_id"), adapter_projection)
+
     ingest_data = finalize_hud_data(
         {
             "item": item,
@@ -690,6 +768,26 @@ async def execute_hud_project_approve_reject(
 
     if item is None:
         return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
+
+    item_status = str(item.get("status") or "").strip().lower()
+    if action == "reject" and item_status in _HUD_PROJECTED_STATUSES:
+        # V1 product semantics: reject only gates the queue. For an already
+        # projected item the user's intent is scrap — surface retract explicitly
+        # instead of a silent "already in terminal state" noop.
+        err = hud_error_payload(
+            f"item '{item_id}' is already projected (status={item_status}); use action 'retract' to remove its live projection",
+            "validation_error",
+            "use_retract",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation="reject on an already-projected item",
+            guidance="Call hud.project with action 'retract' (and item_id) to delete the live Google/Obsidian projection, or action 'update' to correct it in place.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["validation_error"])
 
     if hud_is_terminal_status(item.get("status")):
         terminal_data = finalize_hud_data(
@@ -819,6 +917,10 @@ async def execute_hud_project_approve_reject(
         adapter_projection = dict(adapter_projection)
         adapter_projection["external_dispatch"] = google_projection
 
+    # Persist durable external ids (Google event/task + Obsidian path) so a
+    # later hud.project retract/update can target the exact external objects.
+    hud_persist_item_projection_identity(store, item_id, adapter_projection)
+
     approve_data = finalize_hud_data(
         {
             "item": item,
@@ -835,6 +937,455 @@ async def execute_hud_project_approve_reject(
             actor=actor,
             route_meta=route_meta,
             data=approve_data,
+        ),
+        status=200,
+    )
+
+
+async def execute_hud_project_retract(
+    request: web.Request,
+    *,
+    store: HUDStore,
+    workers: HUDWorkers,
+    hub: HUDAdapterHub,
+    params: Mapping[str, Any],
+    route: str,
+    actor: Optional[str],
+    route_meta: Optional[Dict[str, Any]] = None,
+) -> web.Response:
+    """Retract a projected item: delete its live Google/Obsidian projection.
+
+    Allowed only from ``approved`` / ``synced``. Deletes the Google event/task
+    (via stored external id) and archives/removes the Obsidian note (via stored
+    path). A failed external delete is reported as an error and the item is NOT
+    marked retracted. A 404 "already gone" from Google counts as success.
+    """
+    user_id = hud_resolve_user_id(request, payload=params)
+    try:
+        projection_bundle = hud_effective_projection_mode(
+            request, store=store, user_id=user_id, payload=params
+        )
+    except ValueError as exc:
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid projection_mode: {exc}",
+            guidance="Use 'dry_run', 'live', or omit.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
+    except sqlite3.DatabaseError as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    except Exception as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+
+    projection_mode = projection_bundle["effective_projection_mode"]
+    item_id = params.get("item_id") or params.get("internal_id")
+    if item_id is None or (isinstance(item_id, str) and not item_id.strip()):
+        err = hud_error_payload(
+            "item_id is required for retract action via hud.project",
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation="missing item_id for retract",
+            guidance="Provide the item_id of a previously projected item (use hud.brief to discover approved items if needed).",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
+    try:
+        item_id = validate_hud_id(str(item_id))
+    except ValueError as exc:
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_item_id",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid item_id: {exc}",
+            guidance="item_id must be a valid hex id returned by a prior hud.ingest or hud.brief.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_item_id"])
+
+    try:
+        item = store.get_item(item_id)
+    except sqlite3.DatabaseError as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    except Exception as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    if item is None:
+        return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
+
+    item_status = str(item.get("status") or "").strip().lower()
+    if item_status not in _HUD_PROJECTED_STATUSES:
+        err = hud_error_payload(
+            f"item '{item_id}' is not projected (status={item_status or 'unknown'}); use action 'reject' for non-projected items",
+            "validation_error",
+            "item_not_projected",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation="retract on a non-projected item",
+            guidance="retract is only for already-projected (approved/synced) items. For queued/pending items use action 'reject'.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["validation_error"])
+
+    google_target = str(item.get("google_target") or "").lower()
+    delete_payload = hud_projection_payload_for_item(
+        item, actor, item_status, projection_mode=projection_mode,
+    )
+    deletions: list = []
+    failed: list = []
+
+    # Obsidian note (only when a path was stored from the original projection)
+    if item.get("relative_path") or item.get("file_path"):
+        obsidian_result = await hud_dispatch_projection(hub, "obsidian.delete", delete_payload)
+        deletions.append(obsidian_result)
+        if hud_adapter_projection_failed(obsidian_result):
+            failed.append(obsidian_result)
+
+    # Google external object (calendar event / task)
+    if hud_google_target_projects_externally(google_target):
+        external_id = item.get("external_id") or item.get("google_id")
+        if not external_id:
+            err = hud_error_payload(
+                f"cannot retract item '{item_id}': missing stored external id (google_id/external_id); the item cannot be targeted for deletion",
+                "validation_error",
+                "missing_external_id",
+                route=route,
+                actor=actor,
+            )
+            err["data"] = finalize_hud_data(
+                {"item": item, "deletions": deletions},
+                store=store,
+                user_id=user_id,
+            )
+            return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["validation_error"])
+        if google_target in ("tasks", "gtasks"):
+            google_result = await hud_dispatch_projection(hub, "gtasks.delete", delete_payload)
+        else:
+            google_result = await hud_dispatch_projection(hub, "gcal.delete", delete_payload)
+        deletions.append(google_result)
+        if hud_adapter_projection_failed(google_result):
+            failed.append(google_result)
+
+    if failed:
+        last_error = hud_adapter_projection_error_message(failed[0], fallback_intent="retract")
+        err = hud_error_payload(
+            last_error,
+            "adapter_error",
+            "retract_failed",
+            route=route,
+            actor=actor,
+        )
+        err["adapter_projection"] = failed[0]
+        err["data"] = finalize_hud_data(
+            {"item": item, "deletions": deletions},
+            store=store,
+            user_id=user_id,
+        )
+        return web.json_response(err, status=500)
+
+    try:
+        store.transition_status(item_id, "retracted", actor=actor, reviewed_by=actor)
+    except ValueError as exc:
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_status_transition",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid status transition: {exc}",
+            guidance="retract is only valid from approved/synced. Check current item status via hud.brief first.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["validation_error"])
+    except sqlite3.DatabaseError as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    except Exception as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+
+    try:
+        item = store.get_item(item_id)
+    except sqlite3.DatabaseError as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    except Exception as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    if item is None:
+        return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
+
+    retract_data = finalize_hud_data(
+        {
+            "item": item,
+            "action": "retract",
+            "deletions": deletions,
+            **hud_projection_mode_client_fields(projection_bundle),
+        },
+        store=store,
+        user_id=user_id,
+    )
+    return web.json_response(
+        hud_success_payload(
+            route,
+            status="ok",
+            actor=actor,
+            route_meta=route_meta,
+            data=retract_data,
+        ),
+        status=200,
+    )
+
+
+async def execute_hud_project_update(
+    request: web.Request,
+    *,
+    store: HUDStore,
+    workers: HUDWorkers,
+    hub: HUDAdapterHub,
+    params: Mapping[str, Any],
+    route: str,
+    actor: Optional[str],
+    route_meta: Optional[Dict[str, Any]] = None,
+) -> web.Response:
+    """Update a projected item in place: PATCH the Google object, overwrite the
+    Obsidian note, using the stored external id. Never creates a duplicate.
+    """
+    user_id = hud_resolve_user_id(request, payload=params)
+    try:
+        projection_bundle = hud_effective_projection_mode(
+            request, store=store, user_id=user_id, payload=params
+        )
+    except ValueError as exc:
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid projection_mode: {exc}",
+            guidance="Use 'dry_run', 'live', or omit.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
+    except sqlite3.DatabaseError as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    except Exception as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+
+    projection_mode = projection_bundle["effective_projection_mode"]
+    item_id = params.get("item_id") or params.get("internal_id")
+    if item_id is None or (isinstance(item_id, str) and not item_id.strip()):
+        err = hud_error_payload(
+            "item_id is required for update action via hud.project",
+            "validation_error",
+            "invalid_payload",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation="missing item_id for update",
+            guidance="Provide the item_id of a previously projected item (use hud.brief to discover approved items if needed).",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_payload"])
+    try:
+        item_id = validate_hud_id(str(item_id))
+    except ValueError as exc:
+        err = hud_error_payload(
+            str(exc),
+            "validation_error",
+            "invalid_item_id",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation=f"invalid item_id: {exc}",
+            guidance="item_id must be a valid hex id returned by a prior hud.ingest or hud.brief.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["invalid_item_id"])
+
+    try:
+        item = store.get_item(item_id)
+    except sqlite3.DatabaseError as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    except Exception as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    if item is None:
+        return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
+
+    item_status = str(item.get("status") or "").strip().lower()
+    if item_status not in _HUD_PROJECTED_STATUSES:
+        err = hud_error_payload(
+            f"item '{item_id}' is not projected (status={item_status or 'unknown'}); use action 'approve' or 'project' to project it first",
+            "validation_error",
+            "item_not_projected",
+            route=route,
+            actor=actor,
+        )
+        err.setdefault("data", {})["mcp_meta"] = build_rich_error_meta(
+            current_mode="onboarding" if not is_user_fully_onboarded(store, user_id) else "operational",
+            tool="hud.project",
+            violation="update on a non-projected item",
+            guidance="update is only for already-projected (approved/synced) items. For queued/pending items use action 'approve' first.",
+        )
+        return web.json_response(err, status=HUD_ERROR_HTTP_STATUS["validation_error"])
+
+    base_payload = item.get("payload_json")
+    if not isinstance(base_payload, dict):
+        base_payload = {}
+    updated_payload = dict(base_payload)
+    for key in (
+        "title", "summary", "content", "markdown", "body", "text", "note",
+        "start", "end", "due", "time_zone", "location", "description", "notes",
+    ):
+        if key in params and params[key] is not None:
+            updated_payload[key] = params[key]
+
+    storage_payload = hud_payload_with_hud_metadata(
+        hud_storage_payload(updated_payload),
+        classification=base_payload.get("classification") or {},
+        projection=base_payload.get("projection") or {},
+    )
+    try:
+        store.upsert_item(
+            {
+                "internal_id": item_id,
+                "google_id": item.get("google_id"),
+                "external_id": item.get("external_id"),
+                "actor": actor or item.get("actor"),
+                "intent": item.get("intent") or HUD_INTENT_INGEST,
+                "scope": item.get("scope"),
+                "payload_json": storage_payload,
+                "status": item.get("status") or "approved",
+                "priority_class": item.get("priority_class"),
+                "google_target": item.get("google_target"),
+                "semantic_type": item.get("semantic_type"),
+                "role_ref": item.get("role_ref"),
+                "goal_ref": item.get("goal_ref"),
+                "idempotency_key": item.get("idempotency_key"),
+                "source_id": item.get("source_id"),
+                "last_synced_at": item.get("last_synced_at"),
+                "next_run_at": item.get("next_run_at"),
+                "approved_by": item.get("approved_by"),
+                "reviewed_by": item.get("reviewed_by"),
+                "retry_count": item.get("retry_count", 0),
+                "calendar_id": item.get("calendar_id"),
+                "tasklist_id": item.get("tasklist_id"),
+                "relative_path": item.get("relative_path"),
+            }
+        )
+    except sqlite3.DatabaseError as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    except Exception as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+
+    try:
+        item = store.get_item(item_id)
+    except sqlite3.DatabaseError as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    except Exception as exc:
+        return hud_store_error_response(route=route, actor=actor, exc=exc)
+    if item is None:
+        return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
+
+    # Dispatch upsert with approved status so adapters accept the write; the
+    # stored external id makes Google PATCH in place (no duplicate event/task).
+    dispatch_status = "approved"
+    adapter_projection = await hud_dispatch_projection(
+        hub,
+        item.get("intent", "ingest"),
+        hud_projection_payload_for_item(
+            item, actor, dispatch_status, projection_mode=projection_mode,
+        ),
+    )
+    if hud_adapter_projection_failed(adapter_projection):
+        last_error = hud_adapter_projection_error_message(
+            adapter_projection, fallback_intent="update"
+        )
+        err = hud_error_payload(
+            last_error,
+            "adapter_error",
+            "update_failed",
+            route=route,
+            actor=actor,
+        )
+        err["adapter_projection"] = adapter_projection
+        err["data"] = finalize_hud_data(
+            {"item": item},
+            store=store,
+            user_id=user_id,
+        )
+        return web.json_response(err, status=500)
+
+    google_projection = await _hud_google_projection_dispatch(
+        hub, item, actor, dispatch_status, projection_mode=projection_mode,
+    )
+    if google_projection is not None:
+        adapter_projection = dict(adapter_projection)
+        adapter_projection["external_dispatch"] = google_projection
+        if hud_adapter_projection_failed(google_projection):
+            last_error = hud_adapter_projection_error_message(
+                google_projection, fallback_intent="update"
+            )
+            err = hud_error_payload(
+                last_error,
+                "adapter_error",
+                "update_failed",
+                route=route,
+                actor=actor,
+            )
+            err["adapter_projection"] = google_projection
+            err["data"] = finalize_hud_data(
+                {"item": item},
+                store=store,
+                user_id=user_id,
+            )
+            return web.json_response(err, status=500)
+
+    hud_persist_item_projection_identity(store, item_id, adapter_projection)
+
+    update_data = finalize_hud_data(
+        {
+            "item": item,
+            "action": "update",
+            "adapter_projection": adapter_projection,
+            **hud_projection_mode_client_fields(projection_bundle),
+        },
+        store=store,
+        user_id=user_id,
+    )
+    return web.json_response(
+        hud_success_payload(
+            route,
+            status="ok",
+            actor=actor,
+            route_meta=route_meta,
+            data=update_data,
         ),
         status=200,
     )
@@ -1076,7 +1627,7 @@ async def handle_hud_project(request: web.Request) -> web.Response:
         return push_blocked
 
     action = str(payload.get("action") or payload.get("fate") or "project").strip().lower()
-    if action not in ("project", "approve", "reject"):
+    if action not in ("project", "approve", "reject", "retract", "update"):
         action = "project"
 
     route_meta = hud_route_meta(workers, action if action != "project" else HUD_INTENT_PROJECT)
@@ -1088,6 +1639,28 @@ async def handle_hud_project(request: web.Request) -> web.Response:
             hub=hub,
             params=payload,
             action=action,
+            route=HUD_ROUTE_PROJECT,
+            actor=actor,
+            route_meta=route_meta,
+        )
+    if action == "retract":
+        return await execute_hud_project_retract(
+            request,
+            store=store,
+            workers=workers,
+            hub=hub,
+            params=payload,
+            route=HUD_ROUTE_PROJECT,
+            actor=actor,
+            route_meta=route_meta,
+        )
+    if action == "update":
+        return await execute_hud_project_update(
+            request,
+            store=store,
+            workers=workers,
+            hub=hub,
+            params=payload,
             route=HUD_ROUTE_PROJECT,
             actor=actor,
             route_meta=route_meta,

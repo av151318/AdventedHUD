@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional
 
 logger = logging.getLogger(__name__)
 
-_HUD_TERMINAL_STATUSES = frozenset({"approved", "rejected", "failed", "duplicate", "synced"})
+_HUD_TERMINAL_STATUSES = frozenset({"approved", "rejected", "failed", "duplicate", "synced", "retracted"})
 _HUD_DEFAULT_PROJECTION_MODE = "dry_run"
 _HUD_VALID_PROJECTION_MODES = frozenset({"dry_run", "live"})
 _HUD_USER_PROJECTION_TABLE = "hud_user_projection_preferences"
@@ -27,11 +27,12 @@ _HUD_STATUS_TRANSITIONS = {
     "failed": frozenset(
         {"approved", "rejected", "failed", "duplicate", "synced"}
     ),
-    "approved": frozenset({"approved", "synced"}),
+    "approved": frozenset({"approved", "synced", "retracted"}),
     "rejected": frozenset({"rejected", "synced"}),
     "duplicate": frozenset({"duplicate", "synced"}),
     "ready": frozenset({"ready", "synced"}),
-    "synced": frozenset({"synced"}),
+    "synced": frozenset({"synced", "retracted"}),
+    "retracted": frozenset({"retracted"}),
 }
 
 class HUDStore:
@@ -134,6 +135,9 @@ class HUDStore:
             "source_ref TEXT,"
             "worker_ref TEXT,"
             "last_synced_at TEXT,"
+            "calendar_id TEXT,"
+            "tasklist_id TEXT,"
+            "relative_path TEXT,"
             "queue_rank INTEGER NOT NULL DEFAULT 0)"
         )
         conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_hud_items_idempotency_key ON hud_items(idempotency_key) WHERE idempotency_key IS NOT NULL")
@@ -184,6 +188,12 @@ class HUDStore:
                 conn.execute("ALTER TABLE hud_items ADD COLUMN source_id TEXT")
             if "last_synced_at" not in columns:
                 conn.execute("ALTER TABLE hud_items ADD COLUMN last_synced_at TEXT")
+            if "calendar_id" not in columns:
+                conn.execute("ALTER TABLE hud_items ADD COLUMN calendar_id TEXT")
+            if "tasklist_id" not in columns:
+                conn.execute("ALTER TABLE hud_items ADD COLUMN tasklist_id TEXT")
+            if "relative_path" not in columns:
+                conn.execute("ALTER TABLE hud_items ADD COLUMN relative_path TEXT")
             onboarding_cols = {
                 row["name"]
                 for row in conn.execute(
@@ -229,6 +239,9 @@ class HUDStore:
             "source_type": row["source_type"],
             "source_ref": row["source_ref"], "worker_ref": row["worker_ref"], "queue_rank": row["queue_rank"],
             "last_synced_at": row["last_synced_at"] if "last_synced_at" in row.keys() else None,
+            "calendar_id": row["calendar_id"] if "calendar_id" in row.keys() else None,
+            "tasklist_id": row["tasklist_id"] if "tasklist_id" in row.keys() else None,
+            "relative_path": row["relative_path"] if "relative_path" in row.keys() else None,
         }
 
     def _get_by_idempotency(self, conn: sqlite3.Connection, idempotency_key: str) -> Optional[Dict[str, Any]]:
@@ -513,6 +526,7 @@ class HUDStore:
             payload_dict.get("approved_by"), payload_dict.get("reviewed_by"), next_run_at, payload_dict.get("source_id"),
             payload_dict.get("source_type"), payload_dict.get("source_ref"), payload_dict.get("worker_ref"), queue_rank,
             last_synced_at,
+            payload_dict.get("calendar_id"), payload_dict.get("tasklist_id"), payload_dict.get("relative_path"),
         )
 
         conn = self._connect()
@@ -527,7 +541,7 @@ class HUDStore:
 
             if conn.execute("SELECT 1 FROM hud_items WHERE internal_id = ?", (internal_id,)).fetchone() is not None:
                 conn.execute(
-                    "UPDATE hud_items SET google_id=?, external_id=?, actor=?, intent=?, scope=?, payload_json=?, sync_hash=?, status=?, retry_count=?, last_error=?, priority_class=?, google_target=?, semantic_type=?, role_ref=?, goal_ref=?, idempotency_key=?, updated_at=?, approved_by=?, reviewed_by=?, next_run_at=?, source_id=?, source_type=?, source_ref=?, worker_ref=?, queue_rank=?, last_synced_at=? WHERE internal_id=?",
+                    "UPDATE hud_items SET google_id=?, external_id=?, actor=?, intent=?, scope=?, payload_json=?, sync_hash=?, status=?, retry_count=?, last_error=?, priority_class=?, google_target=?, semantic_type=?, role_ref=?, goal_ref=?, idempotency_key=?, updated_at=?, approved_by=?, reviewed_by=?, next_run_at=?, source_id=?, source_type=?, source_ref=?, worker_ref=?, queue_rank=?, last_synced_at=?, calendar_id=?, tasklist_id=?, relative_path=? WHERE internal_id=?",
                     (
                         payload_dict.get("google_id"), payload_dict.get("external_id"), payload_dict.get("actor"),
                         payload_dict.get("intent"), payload_dict.get("scope"), payload,
@@ -536,12 +550,14 @@ class HUDStore:
                         payload_dict.get("priority_class"), payload_dict.get("google_target"), payload_dict.get("semantic_type"),
                         payload_dict.get("role_ref"), payload_dict.get("goal_ref"), idempotency_key, now, payload_dict.get("approved_by"),
                         payload_dict.get("reviewed_by"), next_run_at, payload_dict.get("source_id"), payload_dict.get("source_type"),
-                        payload_dict.get("source_ref"), payload_dict.get("worker_ref"), queue_rank, last_synced_at, internal_id,
+                        payload_dict.get("source_ref"), payload_dict.get("worker_ref"), queue_rank, last_synced_at,
+                        payload_dict.get("calendar_id"), payload_dict.get("tasklist_id"), payload_dict.get("relative_path"),
+                        internal_id,
                     ),
                 )
             else:
                 conn.execute(
-                    "INSERT INTO hud_items (internal_id, google_id, external_id, actor, intent, scope, payload_json, sync_hash, status, retry_count, last_error, priority_class, google_target, semantic_type, role_ref, goal_ref, idempotency_key, created_at, updated_at, approved_by, reviewed_by, next_run_at, source_id, source_type, source_ref, worker_ref, queue_rank, last_synced_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO hud_items (internal_id, google_id, external_id, actor, intent, scope, payload_json, sync_hash, status, retry_count, last_error, priority_class, google_target, semantic_type, role_ref, goal_ref, idempotency_key, created_at, updated_at, approved_by, reviewed_by, next_run_at, source_id, source_type, source_ref, worker_ref, queue_rank, last_synced_at, calendar_id, tasklist_id, relative_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     insert_values,
                 )
             conn.commit()
@@ -588,7 +604,9 @@ class HUDStore:
     def update_status(self, internal_id: str, status: str, last_error: Optional[str] = None,
                       retry_count: Optional[int] = None, actor: Optional[str] = None,
                       reviewed_by: Optional[str] = None, google_id: Optional[str] = None,
-                      last_synced_at: Optional[Any] = None) -> bool:
+                      last_synced_at: Optional[Any] = None, external_id: Optional[str] = None,
+                      calendar_id: Optional[str] = None, tasklist_id: Optional[str] = None,
+                      relative_path: Optional[str] = None) -> bool:
         updates = {"status": status, "updated_at": self._now_iso()}
         if last_error is not None:
             updates["last_error"] = last_error
@@ -600,6 +618,14 @@ class HUDStore:
             updates["reviewed_by"] = reviewed_by
         if google_id is not None:
             updates["google_id"] = google_id
+        if external_id is not None:
+            updates["external_id"] = external_id
+        if calendar_id is not None:
+            updates["calendar_id"] = calendar_id
+        if tasklist_id is not None:
+            updates["tasklist_id"] = tasklist_id
+        if relative_path is not None:
+            updates["relative_path"] = relative_path
         if last_synced_at is not None:
             updates["last_synced_at"] = self._coerce_timestamp(last_synced_at)
 
@@ -609,6 +635,44 @@ class HUDStore:
         conn = self._connect()
         try:
             cursor = conn.execute(f"UPDATE hud_items SET {assign} WHERE internal_id = ?", tuple(values))
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def update_external_identity(
+        self,
+        internal_id: str,
+        *,
+        google_id: Optional[str] = None,
+        external_id: Optional[str] = None,
+        calendar_id: Optional[str] = None,
+        tasklist_id: Optional[str] = None,
+        relative_path: Optional[str] = None,
+    ) -> bool:
+        """Persist external projection identity (Google ids / Obsidian path) without changing status.
+
+        Called after a successful live projection so a later update/retract can
+        target the exact external object(s).
+        """
+        updates: Dict[str, Any] = {"updated_at": self._now_iso()}
+        if google_id is not None:
+            updates["google_id"] = google_id
+        if external_id is not None:
+            updates["external_id"] = external_id
+        if calendar_id is not None:
+            updates["calendar_id"] = calendar_id
+        if tasklist_id is not None:
+            updates["tasklist_id"] = tasklist_id
+        if relative_path is not None:
+            updates["relative_path"] = relative_path
+        assign = ", ".join(f"{key} = ?" for key in updates)
+        values = list(updates.values()) + [internal_id]
+        conn = self._connect()
+        try:
+            cursor = conn.execute(
+                f"UPDATE hud_items SET {assign} WHERE internal_id = ?", tuple(values)
+            )
             conn.commit()
             return cursor.rowcount > 0
         finally:
@@ -646,6 +710,10 @@ class HUDStore:
         reviewed_by: Optional[str] = None,
         google_id: Optional[str] = None,
         last_synced_at: Optional[Any] = None,
+        external_id: Optional[str] = None,
+        calendar_id: Optional[str] = None,
+        tasklist_id: Optional[str] = None,
+        relative_path: Optional[str] = None,
     ) -> bool:
         """Transition item status through an allowed matrix; raise on invalid transition."""
         item = self.get_item(internal_id)
@@ -666,6 +734,10 @@ class HUDStore:
             reviewed_by=reviewed_by,
             google_id=google_id,
             last_synced_at=last_synced_at,
+            external_id=external_id,
+            calendar_id=calendar_id,
+            tasklist_id=tasklist_id,
+            relative_path=relative_path,
         )
 
     def next_pending(self, limit: int = 50) -> List[Dict[str, Any]]:

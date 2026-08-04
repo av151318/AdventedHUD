@@ -25,6 +25,8 @@ class HUDIntent(str, Enum):
     PROJECT = "project"
     APPROVE = "approve"
     REJECT = "reject"
+    RETRACT = "retract"
+    UPDATE = "update"
     MCP = "mcp"
 
 
@@ -36,6 +38,8 @@ HUD_INTENT_CLASSIFY = HUDIntent.CLASSIFY.value
 HUD_INTENT_PROJECT = HUDIntent.PROJECT.value
 HUD_INTENT_APPROVE = HUDIntent.APPROVE.value
 HUD_INTENT_REJECT = HUDIntent.REJECT.value
+HUD_INTENT_RETRACT = HUDIntent.RETRACT.value
+HUD_INTENT_UPDATE = HUDIntent.UPDATE.value
 HUD_INTENT_MCP = HUDIntent.MCP.value
 
 
@@ -143,6 +147,15 @@ class HUDWorkers:
             "rejected": "rejected",
             "duplicate": "duplicate",
         },
+        HUD_INTENT_RETRACT: {
+            "approved": "retracted",
+            "synced": "retracted",
+            "retracted": "retracted",
+        },
+        HUD_INTENT_UPDATE: {
+            "approved": "approved",
+            "synced": "synced",
+        },
         HUD_INTENT_MCP: {},
     }
     _INTENT_ACTION = {
@@ -154,6 +167,8 @@ class HUDWorkers:
         HUD_INTENT_PROJECT: "project",
         HUD_INTENT_APPROVE: "approve_item",
         HUD_INTENT_REJECT: "reject_item",
+        HUD_INTENT_RETRACT: "retract_item",
+        HUD_INTENT_UPDATE: "update_item",
         HUD_INTENT_MCP: "route_mcp",
     }
     _INTENT_SEMANTIC_TYPE = {
@@ -165,6 +180,8 @@ class HUDWorkers:
         HUD_INTENT_PROJECT: "intent_projection",
         HUD_INTENT_APPROVE: "policy_change",
         HUD_INTENT_REJECT: "policy_change",
+        HUD_INTENT_RETRACT: "policy_change",
+        HUD_INTENT_UPDATE: "policy_change",
         HUD_INTENT_MCP: "transport_routing",
     }
     _INTENT_PRIORITY = {
@@ -176,6 +193,8 @@ class HUDWorkers:
         HUD_INTENT_PROJECT: "normal",
         HUD_INTENT_APPROVE: "critical",
         HUD_INTENT_REJECT: "critical",
+        HUD_INTENT_RETRACT: "critical",
+        HUD_INTENT_UPDATE: "critical",
         HUD_INTENT_MCP: "critical",
     }
     _PROJECTABLE_INTENTS = {
@@ -615,6 +634,8 @@ __all__ = [
     "HUD_INTENT_PROJECT",
     "HUD_INTENT_APPROVE",
     "HUD_INTENT_REJECT",
+    "HUD_INTENT_RETRACT",
+    "HUD_INTENT_UPDATE",
     "HUD_INTENT_MCP",
     "HUDWorkerError",
     "HUDWorkers",

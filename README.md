@@ -62,7 +62,9 @@ AdventedHUD was built to slot into a **three-layer** architecture, with **Advent
 |  +----------+  +----------+  +----------+  +---------------+     |
 |  |  Brief   |  |  Ingest  |  | Project  |  | Onboarding   |     |
 |  | (context)|  | (create) |  |(approve/ |  | (soul +      |     |
-|  |          |  |          |  |  reject) |  |  atomic)     |     |
+|  |          |  |          |  |  reject/ |  |  atomic)     |     |
+|  |          |  |          |  | retract/ |  |              |     |
+|  |          |  |          |  |  update) |  |              |     |
 |  +----+-----+  +----+-----+  +----+-----+  +-------+------+     |
 |       |             |             |                 |            |
 |       +-------------+-------------+-----------------+            |
@@ -235,7 +237,7 @@ HUD exposes a five-tool JSON-RPC surface through a single endpoint (`/hud/mcp`),
 | `hud.brief` (default) | Returns roles, goals, decision matrix (Q1-Q4) for classification | First call every turn -- get context before classifying |
 | `hud.brief` (scoped) | Returns human-readable briefing for a time period or goal | When user asks "what's on my plate?" |
 | `hud.ingest` | Persists a classified item to Obsidian (with optional projection) | After classification -- create a todo/event/note |
-| `hud.project` | Reviews item fate: `approve`, `reject`, or `project` | For item review, approval decisions |
+| `hud.project` | Reviews item fate: `approve`, `reject`, `retract`, `update`, or `project` | For item review, approval decisions, and correcting/removing projected items |
 | `hud.onboarding` | Reads/writes soul.md and atomic roles/goals | Initial setup, profile edits |
 
 ### Decomposed Onboarding Paths
@@ -353,7 +355,7 @@ AdventedHUD/
 |   +-- contracts.py            # Shared models, error payloads, constants
 |   +-- gates.py                # Admin auth, user resolution, onboarding gating
 |   +-- handlers.py             # /health, /sync_status
-|   +-- ingest_project.py       # Ingest + approve/reject pipeline
+|   +-- ingest_project.py       # Ingest + approve/reject/retract/update pipeline
 |   +-- meta.py                 # Meta-prompting / efficiency modes
 |   +-- onboarding.py           # Soul read/write with validation
 |   +-- onboarding_db.py        # DB-level onboarding state management
