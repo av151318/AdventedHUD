@@ -156,7 +156,15 @@ def _build_current_projection(store: HUDStore, user_id: str, days_ahead: int = 3
 
     upcoming = []
     for item in items:
-        due_str = item.get("due") or item.get("scheduled_for") or item.get("date")
+        payload = item.get("payload_json") if isinstance(item.get("payload_json"), Mapping) else {}
+        due_str = (
+            item.get("due")
+            or item.get("scheduled_for")
+            or item.get("date")
+            or payload.get("due")
+            or payload.get("scheduled_for")
+            or payload.get("date")
+        )
         if not due_str:
             continue
         try:
@@ -170,10 +178,10 @@ def _build_current_projection(store: HUDStore, user_id: str, days_ahead: int = 3
                 continue
 
             upcoming.append({
-                "id": item.get("id"),
-                "role": item.get("role_ref") or item.get("role"),
-                "title": item.get("title") or item.get("summary"),
-                "type": item.get("semantic_type") or "todo",
+                "id": item.get("id") or item.get("internal_id"),
+                "role": item.get("role_ref") or item.get("role") or payload.get("role_ref") or payload.get("role"),
+                "title": item.get("title") or item.get("summary") or payload.get("title") or payload.get("summary"),
+                "type": item.get("semantic_type") or payload.get("semantic_type") or "todo",
                 "due": due_str,
                 "status": status,
                 "priority": item.get("priority_class"),
@@ -263,6 +271,145 @@ def _compute_date_context() -> Dict[str, str]:
     }
 
 
+def _normalize_role_key(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _allowed_role_set(grants: Mapping[str, Any]) -> set[str]:
+    return {
+        _normalize_role_key(item)
+        for item in (grants.get("allowed_role_refs") or [])
+        if str(item).strip()
+    }
+
+
+def _item_role_ref(item: Mapping[str, Any]) -> str:
+    payload = item.get("payload_json") if isinstance(item.get("payload_json"), Mapping) else {}
+    return _normalize_role_key(
+        item.get("role_ref")
+        or item.get("role")
+        or payload.get("role_ref")
+        or payload.get("role")
+    )
+
+
+def grants_for_principal(principal: Optional[Mapping[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(principal, Mapping) or principal.get("type") != "agent":
+        return None
+    grants = principal.get("grants")
+    if isinstance(grants, Mapping):
+        return dict(grants)
+    return {
+        "allowed_role_refs": list(principal.get("allowed_role_refs") or []),
+        "calendar_id": principal.get("calendar_id"),
+        "tasklist_id": principal.get("tasklist_id"),
+    }
+
+
+def filter_items_for_grants(
+    items: List[Dict[str, Any]],
+    grants: Optional[Mapping[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not grants:
+        return list(items)
+    allowed = _allowed_role_set(grants)
+    if not allowed:
+        return []
+    return [item for item in items if _item_role_ref(item) in allowed]
+
+
+def filter_google_context_for_grants(
+    google_context: Mapping[str, Any],
+    grants: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    out = dict(google_context)
+    if not grants:
+        return out
+    calendar_id = str(grants.get("calendar_id") or "primary").strip() or "primary"
+    tasklist_id = str(grants.get("tasklist_id") or "@default").strip() or "@default"
+    calendars = []
+    for cal in out.get("calendars") or []:
+        if not isinstance(cal, Mapping):
+            continue
+        cid = str(cal.get("id") or "").strip()
+        if cid == calendar_id or (
+            calendar_id == "primary" and (cid == "primary" or cal.get("primary") is True)
+        ):
+            calendars.append(dict(cal))
+    task_lists = []
+    for lst in out.get("task_lists") or []:
+        if not isinstance(lst, Mapping):
+            continue
+        lid = str(lst.get("id") or "").strip()
+        if lid == tasklist_id:
+            task_lists.append(dict(lst))
+    out["calendars"] = calendars
+    out["task_lists"] = task_lists
+    out["primary_calendar"] = calendar_id
+    out["default_task_list"] = tasklist_id
+    return out
+
+
+def filter_classification_context_for_grants(
+    context: Mapping[str, Any],
+    grants: Optional[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    out = dict(context)
+    if not grants:
+        return out
+    allowed = _allowed_role_set(grants)
+    name_to_slug = dict(out.get("role_name_to_slug") or {})
+    aliases: Dict[str, str] = {}
+    for key, value in name_to_slug.items():
+        aliases[_normalize_role_key(key)] = _normalize_role_key(value)
+        aliases[_normalize_role_key(value)] = _normalize_role_key(value)
+    for role in out.get("roles") or []:
+        if not isinstance(role, Mapping):
+            continue
+        slug = _normalize_role_key(role.get("slug"))
+        name = _normalize_role_key(role.get("name"))
+        if slug:
+            aliases[slug] = slug
+        if name and slug:
+            aliases[name] = slug
+
+    def role_ok(key: Any) -> bool:
+        normalized = _normalize_role_key(key)
+        if normalized in allowed:
+            return True
+        mapped = aliases.get(normalized)
+        return bool(mapped and mapped in allowed)
+
+    out["roles"] = [
+        role
+        for role in (out.get("roles") or [])
+        if isinstance(role, Mapping) and role_ok(role.get("slug"))
+    ]
+    filtered_goals: Dict[str, Any] = {}
+    for key, value in (out.get("goals_by_role") or {}).items():
+        if not role_ok(key):
+            continue
+        slug = aliases.get(_normalize_role_key(key), _normalize_role_key(key))
+        if slug in allowed:
+            filtered_goals[slug] = value
+    out["goals_by_role"] = filtered_goals
+    out["role_name_to_slug"] = {
+        key: value
+        for key, value in name_to_slug.items()
+        if role_ok(value) or role_ok(key)
+    }
+    out["current_projection"] = filter_items_for_grants(
+        list(out.get("current_projection") or []), grants
+    )
+    if "google_context" in out:
+        out["google_context"] = filter_google_context_for_grants(
+            out.get("google_context") or {}, grants
+        )
+    if "items" in out:
+        out["items"] = filter_items_for_grants(list(out.get("items") or []), grants)
+    return out
+
+
 def build_classification_context(
     store: HUDStore,
     user_id: str,
@@ -271,10 +418,11 @@ def build_classification_context(
     classification: Mapping[str, Any],
     projection: Mapping[str, Any],
     hub: Optional["HUDAdapterHub"] = None,   # passed so we can populate real google_context
+    grants: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     extracted = hud_soul_md_extract_roles_and_goals(soul_content)
     matrix_guidance = build_decision_matrix_guidance_alias()
-    return {
+    context = {
         "mode": "classification_context",
         "onboarding_state": resolve_onboarding_state(store, user_id),
         "mission": extract_mission(soul_content),
@@ -290,3 +438,4 @@ def build_classification_context(
         "current_projection": _build_current_projection(store, user_id),  # What is already projected — lets agent detect conflicts intelligently
         "google_context": _build_google_context(hub=hub),  # Real lists/calendars when hub is provided
     }
+    return filter_classification_context_for_grants(context, grants)

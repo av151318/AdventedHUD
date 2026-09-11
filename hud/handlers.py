@@ -30,12 +30,17 @@ from hud.gates import (
     hud_push_policy_client_fields,
     hud_push_policy_gate_response_if_blocked,
     hud_resolve_user_id,
+    hud_principal,
     hud_strip_oauth_secrets,
     hud_tool_for_request,
     require_hud_admin,
     require_hud_principal,
 )
-from hud.brief_context import build_classification_context
+from hud.brief_context import (
+    build_classification_context,
+    filter_items_for_grants,
+    grants_for_principal,
+)
 from hud.onboarding import hud_soul_md_path
 from hud.onboarding_db import hud_onboarding_db_status, is_user_fully_onboarded
 from hud.meta import build_brief_date_meta, finalize_hud_data
@@ -362,6 +367,7 @@ async def handle_brief(request: web.Request) -> web.Response:
             classification=classification,
             projection=projection,
             hub=hub,
+            grants=grants_for_principal(hud_principal(request)),
         )
         brief_data = finalize_hud_data(raw_brief, store=store, user_id=user_id)
 
@@ -393,6 +399,9 @@ async def handle_brief(request: web.Request) -> web.Response:
 
     all_items = items + pending_approval_items
     scoped_items = [item for item in all_items if item.get("scope") == scope]
+    scoped_items = filter_items_for_grants(
+        scoped_items, grants_for_principal(hud_principal(request))
+    )
     deterministic_items = hud_deterministic_items(scoped_items)
     onboarding_context = hud_onboarding_db_status(store, user_id)
     onboarding_needed = onboarding_context["required"]
