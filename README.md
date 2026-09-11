@@ -13,6 +13,7 @@ Exposes HTTP routes and JSON-RPC MCP on port **8200** by default.
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
 - [Environment Reference](#environment-reference)
+- [Auth](#auth)
 - [MCP Tool Surface](#mcp-tool-surface)
 - [HTTP Route Parity](#http-route-parity)
 - [Onboarding Ritual](#onboarding-ritual-v141)
@@ -47,14 +48,15 @@ AdventedHUD was built to slot into a **three-layer** architecture, with **Advent
                            v
 +------------------------------------------------------------------+
 |           AdventedOS Proxy  (port 52415)                         |
-|  Reference auth gateway -- handles:                              |
+|  Tailnet entry -- handles:                                       |
 |    * MCP tool discovery (proxies /openapi.json from HUD)         |
-|    * API key injection & credential management                   |
 |    * Route orchestration (HUD, model inference, etc.)            |
+|  Does not inject X-HUD-Admin-Key -- clients send the header.     |
 |  Not required to run HUD -- any reverse proxy or direct          |
 |  HTTP access works.                                              |
 +---------------------------+--------------------------------------+
-                           |  HTTP / JSON-RPC  (X-HUD-Admin-Key)
+                           |  HTTP / JSON-RPC  (X-HUD-Admin-Key
+                           |   or X-HUD-Agent-Key)
                            v
 +------------------------------------------------------------------+
 |                 AdventedHUD  (port 8200)                         |
@@ -93,7 +95,7 @@ AdventedHUD was built to slot into a **three-layer** architecture, with **Advent
 2. **Agent calls** `hud.ingest` with classified item (role_ref, goal_ref, priority_class, semantic_type, google_target)
 3. **HUD persists** to Obsidian first -- that's the source of truth
 4. **On approval**, HUD projects to Google Calendar/Tasks via OAuth
-5. The **AdventedOS proxy** sits between OWUI and HUD when deployed in reference mode -- handling auth, key injection, and route orchestration
+5. The **AdventedOS proxy** sits between OWUI and HUD when deployed in reference mode -- Tailnet entry on :52415. It does not inject HUD keys; clients send `X-HUD-Admin-Key` or `X-HUD-Agent-Key`. In that stack HUD binds `127.0.0.1:8001` only
 
 ---
 
@@ -167,7 +169,7 @@ To expose HUD's tools to **Open WebUI** or another OpenAPI-compatible tool serve
 http://your-host:8200/openapi.json
 ```
 
-> **For AdventedOS reference deployment**: the proxy at port 52415 handles this discovery automatically and injects the admin key. See [AdventedOS Context](#adventedos-context).
+> **For AdventedOS reference deployment**: the proxy at port 52415 is the Tailnet entry and can proxy `/openapi.json`. It does **not** inject `X-HUD-Admin-Key` -- clients must send `X-HUD-Admin-Key` or `X-HUD-Agent-Key`. HUD listens on `127.0.0.1:8001` only. See [AdventedOS Context](#adventedos-context).
 
 ### Google OAuth Setup (for Calendar/Tasks Projection)
 
@@ -226,6 +228,27 @@ Tokens are resolved similarly: inline -> env var -> file scan for `*.token.json`
 
 ---
 
+## Auth
+
+HUD accepts two additive identities. Send a header on every authenticated request.
+
+| Header | Identity | Notes |
+|--------|----------|-------|
+| `X-HUD-Admin-Key` | Full admin | Must match `HUD_ADMIN_API_KEY`. Invalid or missing admin key still returns **401** `authentication_error` (`invalid_hud_admin_key` / `missing_hud_admin_key`). |
+| `X-HUD-Agent-Key` | Scoped agent | SHA-256 hashed lookup in `hud_agent_keys`. Grants JSON (`allowed_tools`, `allowed_role_refs`, `allowed_google_targets`, `calendar_id`, `tasklist_id`) is stored at provision. |
+
+If both headers are present, **admin wins**.
+
+Disallowed agent tool, role, or Google target returns **403** `authorization_error` / `hud_agent_forbidden` (not a silent coerce).
+
+`POST /hud/agents/keys` is **admin-only** provision. The plaintext key is returned once; HUD stores only the hash. Agents cannot mint keys.
+
+`hud.brief` is filtered to the agent's grants. Admin briefs are unfiltered.
+
+Google Calendar/Tasks writes are HUD-mediated. Agents are forced to `calendar_id=primary` and `tasklist_id=@default`. HUD never returns OAuth tokens.
+
+---
+
 ## MCP Tool Surface
 
 HUD exposes a five-tool JSON-RPC surface through a single endpoint (`/hud/mcp`), plus decomposed first-class HTTP paths for direct access.
@@ -234,7 +257,7 @@ HUD exposes a five-tool JSON-RPC surface through a single endpoint (`/hud/mcp`),
 
 | Method | Purpose | Agent Use |
 |--------|---------|-----------|
-| `hud.brief` (default) | Returns roles, goals, decision matrix (Q1-Q4) for classification | First call every turn -- get context before classifying |
+| `hud.brief` (default) | Returns roles, goals, decision matrix (Q1-Q4) for classification. Agent principals get a grant-filtered brief; admin is unfiltered | First call every turn -- get context before classifying |
 | `hud.brief` (scoped) | Returns human-readable briefing for a time period or goal | When user asks "what's on my plate?" |
 | `hud.ingest` | Persists a classified item to Obsidian (with optional projection) | After classification -- create a todo/event/note |
 | `hud.project` | Reviews item fate: `approve`, `reject`, `retract`, `update`, or `project` | For item review, approval decisions, and correcting/removing projected items |
@@ -268,6 +291,7 @@ All MCP methods have direct HTTP path equivalents:
 | `/hud/ingest` | POST | `hud.ingest` |
 | `/hud/project` | POST | `hud.project` |
 | `/hud/mcp` | POST | All tools (JSON-RPC) |
+| `/hud/agents/keys` | POST | Admin-only agent key provision |
 | `/hud/onboarding/soul` | GET, POST | Legacy combined onboarding |
 | `/hud/onboarding/read` | GET | `hud.onboarding.read` |
 | `/hud/onboarding/write_soul` | POST | `hud.onboarding.write_soul` |
@@ -317,7 +341,7 @@ The `mcp_meta` instruction system -- which tells agents "call this next" -- is o
 
 AdventedHUD was built as part of **AdventedOS** -- a personal server infrastructure that bundles:
 
-- **AdventedOS Proxy** -- An HTTP gateway (port 52415) that routes requests between OWUI, HUD, model inference endpoints, and other services. Handles MCP tool discovery, API key injection, and cross-service orchestration.
+- **AdventedOS Proxy** -- Tailnet HTTP gateway on port **52415**. Routes requests between OWUI, HUD, model inference, and other services. Proxies HUD `/openapi.json` for tool discovery. It does **not** inject `X-HUD-Admin-Key`; clients must send `X-HUD-Admin-Key` or `X-HUD-Agent-Key`.
 - **Open WebUI (OWUI)** -- Chat interface for interacting with LLMs. Discovers HUD's tools via the OpenAPI spec and manages conversation state.
 
 ### Running HUD in the AdventedOS Stack
@@ -332,12 +356,12 @@ AdventedOS/
 +-- docker-compose.yml  # OWUI container config
 ```
 
-The proxy automatically:
-- Serves HUD's `/openapi.json` for OWUI tool discovery
-- Injects the `X-HUD-Admin-Key` header on behalf of the user
-- Routes `/hud/*` traffic to the HUD service on port 8200
+In that stack:
+- HUD binds **`127.0.0.1:8001` only** (not Tailnet-reachable)
+- The proxy on **:52415** is the Tailnet entry and routes `/hud/*` to HUD
+- Clients still send `X-HUD-Admin-Key` or `X-HUD-Agent-Key` themselves
 
-**You do not need AdventedOS to run AdventedHUD.** The service is fully standalone -- point any HTTP client or MCP-capable agent directly at port 8200.
+**You do not need AdventedOS to run AdventedHUD.** The service is fully standalone -- point any HTTP client or MCP-capable agent directly at the listen port (`HUD_PORT`, default 8200).
 
 ---
 
@@ -353,7 +377,7 @@ AdventedHUD/
 |   +-- adapters.py             # Google OAuth, Calendar, Tasks projection
 |   +-- brief_context.py        # Decision matrix + context builder
 |   +-- contracts.py            # Shared models, error payloads, constants
-|   +-- gates.py                # Admin auth, user resolution, onboarding gating
+|   +-- gates.py                # Admin/agent auth, grants, onboarding gating
 |   +-- handlers.py             # /health, /sync_status
 |   +-- ingest_project.py       # Ingest + approve/reject/retract/update pipeline
 |   +-- meta.py                 # Meta-prompting / efficiency modes
