@@ -12,7 +12,11 @@ from aiohttp import web
 
 from hud.contracts import (
     HUD_ERROR_HTTP_STATUS,
+    HUD_ROUTE_ONBOARDING_READ,
+    HUD_ROUTE_ONBOARDING_SET_ATOMIC,
+    HUD_ROUTE_ONBOARDING_SET_PUSH,
     HUD_ROUTE_ONBOARDING_SOUL,
+    HUD_ROUTE_ONBOARDING_WRITE_SOUL,
     hud_error_payload,
     hud_success_payload,
 )
@@ -20,11 +24,13 @@ from hud.contracts import HUD_PROJECTION_MODE_DRY_RUN, HUD_PROJECTION_MODE_LIVE
 from hud.gates import (
     DEFAULT_SOUL_PATH,
     hud_actor,
+    hud_enforce_agent_tool,
     hud_normalize_identifier,
     hud_parse_explicit_bool,
     hud_push_policy_client_fields,
     hud_require_post_onboarding_push_policy,
     hud_resolve_user_id,
+    hud_tool_for_request,
 )
 from hud.meta import finalize_hud_data
 from hud.onboarding_db import (
@@ -987,6 +993,11 @@ async def handle_onboarding_soul_read(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=str(request.path)
+    )
+    if tool_denied is not None:
+        return tool_denied
     store: HUDStore = request.app["hud_store"]
     return hud_onboarding_soul_read_response(
         store=store,
@@ -1004,6 +1015,11 @@ async def handle_onboarding_soul_write(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=str(request.path)
+    )
+    if tool_denied is not None:
+        return tool_denied
     try:
         payload = require_json(await request.text())
     except ValueError as exc:
@@ -1034,6 +1050,11 @@ async def handle_onboarding_read(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=str(request.path)
+    )
+    if tool_denied is not None:
+        return tool_denied
     store: HUDStore = request.app["hud_store"]
     return hud_onboarding_soul_read_response(
         store=store,
@@ -1052,6 +1073,11 @@ async def handle_onboarding_write_soul(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=str(request.path)
+    )
+    if tool_denied is not None:
+        return tool_denied
     try:
         payload = require_json(await request.text())
     except ValueError as exc:
@@ -1095,6 +1121,11 @@ async def handle_onboarding_set_atomic(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=str(request.path)
+    )
+    if tool_denied is not None:
+        return tool_denied
     try:
         payload = require_json(await request.text())
     except ValueError as exc:
@@ -1185,6 +1216,11 @@ async def handle_onboarding_set_push(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=str(request.path)
+    )
+    if tool_denied is not None:
+        return tool_denied
     try:
         payload = require_json(await request.text())
     except ValueError as exc:

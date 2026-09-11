@@ -172,6 +172,255 @@ async def require_hud_principal(request: web.Request) -> Optional[web.Response]:
     return await require_hud_admin(request)
 
 
+def hud_principal(request: web.Request) -> Dict[str, Any]:
+    principal = request.get("hud_principal")
+    if isinstance(principal, Mapping):
+        return dict(principal)
+    return {}
+
+
+def hud_is_admin_principal(request: web.Request) -> bool:
+    return hud_principal(request).get("type") == "admin"
+
+
+def hud_agent_forbidden_response(
+    request: web.Request,
+    *,
+    message: str = "Agent is not permitted to perform this HUD operation",
+    route: Optional[str] = None,
+) -> web.Response:
+    actor = hud_actor(request)
+    return web.json_response(
+        hud_error_payload(
+            message,
+            "authorization_error",
+            "hud_agent_forbidden",
+            route=route or str(request.path),
+            actor=actor,
+        ),
+        status=403,
+    )
+
+
+_HUD_ONBOARDING_TOOLS = frozenset(
+    {
+        "hud.onboarding",
+        "hud.onboarding.read",
+        "hud.onboarding.write_soul",
+        "hud.onboarding.set_atomic",
+        "hud.onboarding.set_push",
+    }
+)
+
+_HUD_ROUTE_TOOLS = {
+    "/hud/brief": "hud.brief",
+    "/hud/ingest": "hud.ingest",
+    "/hud/project": "hud.project",
+    "/hud/sync_status": "hud.sync_status",
+    "/hud/status": "hud.sync_status",
+    "/hud/agents/keys": "hud.agents.keys",
+    "/hud/onboarding/soul": "hud.onboarding",
+    "/hud/onboarding/read": "hud.onboarding.read",
+    "/hud/onboarding/write_soul": "hud.onboarding.write_soul",
+    "/hud/onboarding/set_atomic": "hud.onboarding.set_atomic",
+    "/hud/onboarding/set_push": "hud.onboarding.set_push",
+}
+
+_GOOGLE_TARGET_ALIASES = {
+    "calendar": "calendar",
+    "gcal": "calendar",
+    "google_calendar": "calendar",
+    "tasks": "tasks",
+    "gtasks": "tasks",
+    "google_tasks": "tasks",
+    "obsidian": "obsidian",
+    "base": "obsidian",
+    "role": "obsidian",
+    "goal": "obsidian",
+}
+
+
+def hud_normalize_google_target(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if not text:
+        return ""
+    return _GOOGLE_TARGET_ALIASES.get(text, text)
+
+
+def hud_tool_for_request(request: web.Request, *, mcp_method: Optional[str] = None) -> str:
+    if mcp_method:
+        return str(mcp_method).strip()
+    path = str(request.path or "")
+    return _HUD_ROUTE_TOOLS.get(path, path)
+
+
+def hud_enforce_agent_tool(
+    request: web.Request,
+    *,
+    tool: str,
+    route: Optional[str] = None,
+) -> Optional[web.Response]:
+    """403 agent principals for disallowed tools. Admin skips. Onboarding/soul always forbidden."""
+    principal = hud_principal(request)
+    if principal.get("type") != "agent":
+        return None
+    normalized = str(tool or "").strip()
+    if normalized.startswith("hud.onboarding") or normalized in _HUD_ONBOARDING_TOOLS:
+        return hud_agent_forbidden_response(
+            request,
+            message="Agent is not permitted to use onboarding or soul rewrite",
+            route=route,
+        )
+    allowed = [
+        str(item).strip()
+        for item in (principal.get("allowed_tools") or [])
+        if str(item).strip()
+    ]
+    if normalized not in allowed:
+        return hud_agent_forbidden_response(
+            request,
+            message=f"Agent is not permitted to use tool '{normalized}'",
+            route=route,
+        )
+    return None
+
+
+def hud_enforce_agent_role_ref(
+    request: web.Request,
+    payload: Optional[Mapping[str, Any]] = None,
+    *,
+    route: Optional[str] = None,
+) -> Optional[web.Response]:
+    principal = hud_principal(request)
+    if principal.get("type") != "agent":
+        return None
+    data = payload or {}
+    role = None
+    for key in ("role_ref", "role", "roleId", "role_id"):
+        raw = data.get(key)
+        if raw is not None and str(raw).strip():
+            role = str(raw).strip()
+            break
+    if not role:
+        return None
+    allowed = [
+        str(item).strip()
+        for item in (principal.get("allowed_role_refs") or [])
+        if str(item).strip()
+    ]
+    if role not in allowed:
+        return hud_agent_forbidden_response(
+            request,
+            message=f"Agent is not permitted to use role_ref '{role}'",
+            route=route,
+        )
+    return None
+
+
+def hud_enforce_agent_google_grants(
+    request: web.Request,
+    payload: Optional[Mapping[str, Any]] = None,
+    *,
+    route: Optional[str] = None,
+) -> Optional[web.Response]:
+    """403 when google_target / calendar_id / tasklist_id are outside grants. No silent coerce."""
+    principal = hud_principal(request)
+    if principal.get("type") != "agent":
+        return None
+    data = payload or {}
+    grants = principal.get("grants") if isinstance(principal.get("grants"), Mapping) else principal
+    allowed_targets = [
+        hud_normalize_google_target(item)
+        for item in (principal.get("allowed_google_targets") or [])
+        if str(item).strip()
+    ]
+    allowed_targets = [item for item in allowed_targets if item]
+
+    raw_target = data.get("google_target")
+    if raw_target is not None and str(raw_target).strip():
+        target = hud_normalize_google_target(raw_target)
+        # Obsidian is HUD's primary store, not a Google grant target.
+        if target and target not in {"obsidian"} and target not in allowed_targets:
+            return hud_agent_forbidden_response(
+                request,
+                message=f"Agent is not permitted to use google_target '{target}'",
+                route=route,
+            )
+
+    grant_calendar = None
+    grant_tasklist = None
+    if isinstance(grants, Mapping):
+        grant_calendar = grants.get("calendar_id")
+        grant_tasklist = grants.get("tasklist_id")
+    if grant_calendar is None:
+        grant_calendar = principal.get("calendar_id")
+    if grant_tasklist is None:
+        grant_tasklist = principal.get("tasklist_id")
+
+    requested_calendar = data.get("calendar_id")
+    if requested_calendar is not None and str(requested_calendar).strip():
+        requested = str(requested_calendar).strip()
+        if grant_calendar is not None and requested != str(grant_calendar).strip():
+            return hud_agent_forbidden_response(
+                request,
+                message="Agent is not permitted to use this calendar_id",
+                route=route,
+            )
+    requested_tasklist = data.get("tasklist_id")
+    if requested_tasklist is not None and str(requested_tasklist).strip():
+        requested = str(requested_tasklist).strip()
+        if grant_tasklist is not None and requested != str(grant_tasklist).strip():
+            return hud_agent_forbidden_response(
+                request,
+                message="Agent is not permitted to use this tasklist_id",
+                route=route,
+            )
+    return None
+
+
+def hud_force_agent_google_ids(
+    request: web.Request,
+    payload: Mapping[str, Any],
+    *,
+    google_target: Any = None,
+) -> Dict[str, Any]:
+    """Force agent Google writes onto grant calendar_id / tasklist_id when those grants are set.
+
+    Only applied for calendar/tasks targets so injecting ids cannot flip an Obsidian ingest
+    into a Google write via worker hint inference.
+    """
+    principal = hud_principal(request)
+    out = dict(payload)
+    if principal.get("type") != "agent":
+        return out
+    grants = principal.get("grants") if isinstance(principal.get("grants"), Mapping) else principal
+    calendar_id = grants.get("calendar_id") if isinstance(grants, Mapping) else None
+    tasklist_id = grants.get("tasklist_id") if isinstance(grants, Mapping) else None
+    target = hud_normalize_google_target(
+        google_target if google_target is not None else out.get("google_target")
+    )
+    if target == "calendar" and calendar_id is not None and str(calendar_id).strip():
+        out["calendar_id"] = str(calendar_id).strip()
+    if target == "tasks" and tasklist_id is not None and str(tasklist_id).strip():
+        out["tasklist_id"] = str(tasklist_id).strip()
+    return out
+
+
+def hud_strip_oauth_secrets(value: Any) -> Any:
+    """Never let Google OAuth tokens leave HUD responses."""
+    if isinstance(value, Mapping):
+        redacted: Dict[str, Any] = {}
+        for key, inner in value.items():
+            lowered = str(key).lower()
+            if lowered in {"access_token", "refresh_token", "id_token", "oauth_token"}:
+                continue
+            redacted[key] = hud_strip_oauth_secrets(inner)
+        return redacted
+    if isinstance(value, list):
+        return [hud_strip_oauth_secrets(item) for item in value]
+    return value
+
+
 def hud_agent_safe_onboarding_errors() -> bool:
     return os.environ.get("HUD_AGENT_SAFE_ONBOARDING_ERRORS", "").strip().lower() in {
         "1",

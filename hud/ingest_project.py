@@ -26,12 +26,18 @@ from hud.contracts import (
 )
 from hud.gates import (
     hud_effective_projection_mode,
+    hud_enforce_agent_google_grants,
+    hud_enforce_agent_role_ref,
+    hud_enforce_agent_tool,
+    hud_force_agent_google_ids,
     hud_normalize_identifier,
     hud_onboarding_gate_response_if_blocked,
     hud_parse_explicit_bool,
     hud_projection_mode_client_fields,
     hud_push_policy_gate_response_if_blocked,
     hud_resolve_user_id,
+    hud_strip_oauth_secrets,
+    hud_tool_for_request,
     require_hud_admin,
     require_hud_principal,
 )
@@ -252,6 +258,12 @@ def hud_projection_payload_for_item(
     ):
         if key in item and key not in projection_payload:
             projection_payload[key] = item.get(key)
+    nested = item.get("payload_json")
+    if isinstance(nested, dict):
+        if not projection_payload.get("calendar_id") and nested.get("calendar_id"):
+            projection_payload["calendar_id"] = nested.get("calendar_id")
+        if not projection_payload.get("tasklist_id") and nested.get("tasklist_id"):
+            projection_payload["tasklist_id"] = nested.get("tasklist_id")
     return {
         "intent": item.get("intent")
         or (item.get("payload_json") or {}).get("intent", HUD_INTENT_INGEST),
@@ -530,6 +542,12 @@ async def execute_hud_ingest(
     ingest_payload = hud_apply_user_onboarding_context(
         dict(payload), store=store, user_id=user_id
     )
+    grant_denied = hud_enforce_agent_role_ref(
+        request, ingest_payload, route=route
+    ) or hud_enforce_agent_google_grants(request, ingest_payload, route=route)
+    if grant_denied is not None:
+        return grant_denied
+    ingest_payload = hud_force_agent_google_ids(request, ingest_payload)
     auto_approve_push = hud_ingest_auto_approve_push(store, user_id, projection_mode)
     queue_explicit = _ingest_explicit_requires_approval(ingest_payload)
     if auto_approve_push and not queue_explicit:
@@ -547,6 +565,11 @@ async def execute_hud_ingest(
         intent=ingest_intent,
         status="queued",
         projection_mode=projection_mode,
+    )
+    ingest_payload = hud_force_agent_google_ids(
+        request,
+        ingest_payload,
+        google_target=classification.get("google_target"),
     )
     initial_status = "pending_approval" if projection.get("requires_approval") else "queued"
     if auto_approve_push and not queue_explicit:
@@ -603,6 +626,8 @@ async def execute_hud_ingest(
                 "idempotency_key": idempotency_key,
                 "source_id": hud_extract_source_id(ingest_payload),
                 "last_synced_at": ingest_payload.get("last_synced_at"),
+                "calendar_id": ingest_payload.get("calendar_id"),
+                "tasklist_id": ingest_payload.get("tasklist_id"),
             }
         )
     except sqlite3.DatabaseError as exc:
@@ -676,6 +701,7 @@ async def execute_hud_ingest(
         google_target=str(classification.get("google_target") or item.get("google_target") or ""),
         semantic_type=str(classification.get("semantic_type") or item.get("semantic_type") or ""),
     )
+    ingest_data = hud_strip_oauth_secrets(ingest_data)
     return web.json_response(
         hud_success_payload(
             route,
@@ -1429,6 +1455,12 @@ async def execute_hud_project_default(
 
     projection_mode = projection_bundle["effective_projection_mode"]
     enriched = hud_apply_user_onboarding_context(dict(params), store=store, user_id=user_id)
+    grant_denied = hud_enforce_agent_role_ref(
+        request, enriched, route=route
+    ) or hud_enforce_agent_google_grants(request, enriched, route=route)
+    if grant_denied is not None:
+        return grant_denied
+    enriched = hud_force_agent_google_ids(request, enriched)
     onboarding_needed = bool(enriched.get("onboarding_needed"))
     onboarding_needed_reason = enriched.get("onboarding_needed_reason")
     classification, projection = hud_classify_project_pair(
@@ -1509,6 +1541,7 @@ async def execute_hud_project_default(
         store=store,
         user_id=user_id,
     )
+    project_data = hud_strip_oauth_secrets(project_data)
     return web.json_response(
         hud_success_payload(
             route,
@@ -1528,6 +1561,11 @@ async def handle_hud_ingest(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=HUD_ROUTE_INGEST
+    )
+    if tool_denied is not None:
+        return tool_denied
 
     store: HUDStore = request.app["hud_store"]
     workers: HUDWorkers = request.app["hud_workers"]
@@ -1546,6 +1584,13 @@ async def handle_hud_ingest(request: web.Request) -> web.Response:
             ),
             status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
         )
+
+    grant_denied = hud_enforce_agent_role_ref(
+        request, payload, route=HUD_ROUTE_INGEST
+    ) or hud_enforce_agent_google_grants(request, payload, route=HUD_ROUTE_INGEST)
+    if grant_denied is not None:
+        return grant_denied
+    payload = hud_force_agent_google_ids(request, payload)
 
     user_id = hud_resolve_user_id(request, payload=payload)
     blocked = hud_onboarding_gate_response_if_blocked(
@@ -1584,6 +1629,11 @@ async def handle_hud_project(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=HUD_ROUTE_PROJECT
+    )
+    if tool_denied is not None:
+        return tool_denied
 
     store: HUDStore = request.app["hud_store"]
     workers: HUDWorkers = request.app["hud_workers"]
@@ -1616,6 +1666,13 @@ async def handle_hud_project(request: web.Request) -> web.Response:
             )
     else:
         payload = {}
+
+    grant_denied = hud_enforce_agent_role_ref(
+        request, payload, route=HUD_ROUTE_PROJECT
+    ) or hud_enforce_agent_google_grants(request, payload, route=HUD_ROUTE_PROJECT)
+    if grant_denied is not None:
+        return grant_denied
+    payload = hud_force_agent_google_ids(request, payload)
 
     user_id = hud_resolve_user_id(request, payload=payload)
     push_blocked = hud_push_policy_gate_response_if_blocked(

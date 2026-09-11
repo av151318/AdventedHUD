@@ -23,12 +23,15 @@ from hud.contracts import (
 from hud.gates import (
     hud_actor,
     hud_effective_projection_mode,
+    hud_enforce_agent_tool,
     hud_onboarding_gate_response_if_blocked,
     hud_parse_explicit_bool,
     hud_projection_mode_client_fields,
     hud_push_policy_client_fields,
     hud_push_policy_gate_response_if_blocked,
     hud_resolve_user_id,
+    hud_strip_oauth_secrets,
+    hud_tool_for_request,
     require_hud_admin,
     require_hud_principal,
 )
@@ -184,6 +187,11 @@ async def handle_sync_status(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=str(request.path)
+    )
+    if tool_denied is not None:
+        return tool_denied
 
     route = str(request.path)
     store: HUDStore = request.app["hud_store"]
@@ -257,6 +265,7 @@ async def handle_sync_status(request: web.Request) -> web.Response:
     status_data = hud_status_data(items)
     status_data["adapter_sync_previews"] = await hud_adapter_sync_previews(hub)
     status_data = finalize_hud_data(status_data, store=store, user_id=user_id)
+    status_data = hud_strip_oauth_secrets(status_data)
 
     return web.json_response(
         hud_success_payload(route, status="ok", actor=actor, data=status_data),
@@ -269,6 +278,11 @@ async def handle_brief(request: web.Request) -> web.Response:
     denied = await require_hud_principal(request)
     if denied is not None:
         return denied
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=hud_tool_for_request(request), route=str(request.path)
+    )
+    if tool_denied is not None:
+        return tool_denied
 
     store: HUDStore = request.app["hud_store"]
     workers: HUDWorkers = request.app["hud_workers"]

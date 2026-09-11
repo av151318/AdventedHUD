@@ -24,10 +24,15 @@ from hud.contracts import (
 )
 from hud.gates import (
     hud_actor,
+    hud_enforce_agent_google_grants,
+    hud_enforce_agent_role_ref,
+    hud_enforce_agent_tool,
+    hud_force_agent_google_ids,
     hud_onboarding_gate_response_if_blocked,
     hud_push_policy_client_fields,
     hud_push_policy_gate_response_if_blocked,
     hud_resolve_user_id,
+    hud_strip_oauth_secrets,
     require_hud_admin,
     require_hud_principal,
 )
@@ -102,6 +107,12 @@ async def handle_mcp(request: web.Request) -> web.Response:
             status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
         )
 
+    tool_denied = hud_enforce_agent_tool(
+        request, tool=method, route=HUD_ROUTE_MCP
+    )
+    if tool_denied is not None:
+        return tool_denied
+
     route_intent = HUD_MCP_METHODS.get(method)
     if route_intent is None:
         return web.json_response(
@@ -129,6 +140,13 @@ async def handle_mcp(request: web.Request) -> web.Response:
             ),
             status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
         )
+
+    grant_denied = hud_enforce_agent_role_ref(
+        request, params, route=HUD_ROUTE_MCP
+    ) or hud_enforce_agent_google_grants(request, params, route=HUD_ROUTE_MCP)
+    if grant_denied is not None:
+        return grant_denied
+    params = hud_force_agent_google_ids(request, params)
 
     user_id = hud_resolve_user_id(request, payload=params)
 
