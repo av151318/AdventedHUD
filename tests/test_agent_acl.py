@@ -565,3 +565,197 @@ def test_admin_onboarding_and_ingest_still_allowed(monkeypatch, tmp_path):
                 await client.close()
 
     asyncio.run(run())
+
+def test_agent_project_actions_on_stored_founder_item_are_403(monkeypatch, tmp_path):
+    """Guessing a founder item_id must 403 even if the body claims content."""
+    _env(monkeypatch, tmp_path)
+    _onboard(tmp_path)
+    app = create_app()
+    minted = _mint_content_agent(app)
+    store: HUDStore = app["hud_store"]
+    cases = (
+        ("approve", "queued", "acl-founder-approve"),
+        ("reject", "queued", "acl-founder-reject"),
+        ("retract", "approved", "acl-founder-retract"),
+        ("update", "approved", "acl-founder-update"),
+    )
+    for _action, status, item_id in cases:
+        store.upsert_item(
+            {
+                "internal_id": item_id,
+                "actor": "admin",
+                "intent": "ingest",
+                "scope": "today",
+                "status": status,
+                "payload_json": {"title": "Founder secret", "role_ref": "founder"},
+                "role_ref": "founder",
+                "google_target": "obsidian",
+            }
+        )
+
+    async def run():
+        with patch(
+            "hud.ingest_project.hud_dispatch_projection",
+            new=AsyncMock(side_effect=_fake_google_dispatch),
+        ):
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                for action, _status, item_id in cases:
+                    resp = await client.post(
+                        "/hud/project",
+                        headers=_agent_headers(minted["key"]),
+                        json={
+                            "action": action,
+                            "item_id": item_id,
+                            "title": "Hijack",
+                            "role_ref": "content",
+                        },
+                    )
+                    body = await resp.json()
+                    assert resp.status == 403, (action, resp.status, body)
+                    _assert_forbidden(body)
+                    _assert_no_oauth_tokens(body)
+            finally:
+                await client.close()
+
+    asyncio.run(run())
+
+
+def test_agent_project_update_stored_content_item_not_403_for_role(monkeypatch, tmp_path):
+    """Stored content role_ref is in grant; omitting role_ref in the body is not 403."""
+    _env(monkeypatch, tmp_path)
+    _onboard(tmp_path)
+    app = create_app()
+    minted = _mint_content_agent(app)
+    store: HUDStore = app["hud_store"]
+    store.upsert_item(
+        {
+            "internal_id": "acl-content-stored-1",
+            "actor": "content",
+            "intent": "ingest",
+            "scope": "today",
+            "status": "approved",
+            "payload_json": {"title": "Content item", "role_ref": "content"},
+            "role_ref": "content",
+            "google_target": "obsidian",
+        }
+    )
+
+    async def run():
+        with patch(
+            "hud.ingest_project.hud_dispatch_projection",
+            new=AsyncMock(side_effect=_fake_google_dispatch),
+        ):
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                resp = await client.post(
+                    "/hud/project",
+                    headers=_agent_headers(minted["key"]),
+                    json={
+                        "action": "update",
+                        "item_id": "acl-content-stored-1",
+                        "title": "Updated content title",
+                    },
+                )
+                body = await resp.json()
+                assert resp.status != 403, body
+                assert body.get("error", {}).get("code") != "hud_agent_forbidden"
+            finally:
+                await client.close()
+
+    asyncio.run(run())
+
+
+def test_agent_project_update_stored_out_of_grant_calendar_is_403(monkeypatch, tmp_path):
+    """Stored calendar_id outside grants must 403 even when the body omits it."""
+    _env(monkeypatch, tmp_path)
+    _onboard(tmp_path)
+    app = create_app()
+    minted = _mint_content_agent(app)
+    store: HUDStore = app["hud_store"]
+    store.upsert_item(
+        {
+            "internal_id": "acl-other-cal-1",
+            "actor": "content",
+            "intent": "ingest",
+            "scope": "today",
+            "status": "approved",
+            "payload_json": {"title": "Other cal", "role_ref": "content"},
+            "role_ref": "content",
+            "google_target": "calendar",
+            "calendar_id": "other-calendar",
+        }
+    )
+
+    async def run():
+        with patch(
+            "hud.ingest_project.hud_dispatch_projection",
+            new=AsyncMock(side_effect=_fake_google_dispatch),
+        ):
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                resp = await client.post(
+                    "/hud/project",
+                    headers=_agent_headers(minted["key"]),
+                    json={
+                        "action": "update",
+                        "item_id": "acl-other-cal-1",
+                        "title": "Try other calendar",
+                        "role_ref": "content",
+                    },
+                )
+                body = await resp.json()
+                assert resp.status == 403, body
+                _assert_forbidden(body)
+                _assert_no_oauth_tokens(body)
+            finally:
+                await client.close()
+
+    asyncio.run(run())
+
+
+def test_admin_project_update_stored_founder_item_still_200(monkeypatch, tmp_path):
+    _env(monkeypatch, tmp_path)
+    _onboard(tmp_path)
+    app = create_app()
+    _mint_content_agent(app)
+    store: HUDStore = app["hud_store"]
+    store.upsert_item(
+        {
+            "internal_id": "acl-admin-founder-1",
+            "actor": "admin",
+            "intent": "ingest",
+            "scope": "today",
+            "status": "approved",
+            "payload_json": {"title": "Founder admin", "role_ref": "founder"},
+            "role_ref": "founder",
+            "google_target": "obsidian",
+        }
+    )
+
+    async def run():
+        with patch(
+            "hud.ingest_project.hud_dispatch_projection",
+            new=AsyncMock(side_effect=_fake_google_dispatch),
+        ):
+            client = TestClient(TestServer(app))
+            await client.start_server()
+            try:
+                resp = await client.post(
+                    "/hud/project",
+                    headers=_admin_headers(),
+                    json={
+                        "action": "update",
+                        "item_id": "acl-admin-founder-1",
+                        "title": "Admin may update founder",
+                    },
+                )
+                body = await resp.json()
+                assert resp.status == 200, body
+            finally:
+                await client.close()
+
+    asyncio.run(run())

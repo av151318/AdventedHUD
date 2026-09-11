@@ -378,6 +378,40 @@ def hud_enforce_agent_google_grants(
     return None
 
 
+def hud_stored_item_grant_payload(item: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Grant fields from a stored HUD item, including payload_json fallbacks."""
+    if not isinstance(item, Mapping):
+        return {}
+    nested = item.get("payload_json")
+    nested = nested if isinstance(nested, Mapping) else {}
+    out: Dict[str, Any] = {}
+    for key in ("role_ref", "role", "google_target", "calendar_id", "tasklist_id"):
+        raw = item.get(key)
+        if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+            raw = nested.get(key)
+        if raw is not None and str(raw).strip():
+            out[key] = raw
+    return out
+
+
+def hud_enforce_agent_stored_item(
+    request: web.Request,
+    item: Optional[Mapping[str, Any]],
+    *,
+    route: Optional[str] = None,
+) -> Optional[web.Response]:
+    """Re-check role_ref / Google grants against the stored item. Admin skips."""
+    principal = hud_principal(request)
+    if principal.get("type") != "agent":
+        return None
+    stored = hud_stored_item_grant_payload(item)
+    if not stored:
+        return None
+    return hud_enforce_agent_role_ref(
+        request, stored, route=route
+    ) or hud_enforce_agent_google_grants(request, stored, route=route)
+
+
 def hud_force_agent_google_ids(
     request: web.Request,
     payload: Mapping[str, Any],

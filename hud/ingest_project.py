@@ -28,6 +28,7 @@ from hud.gates import (
     hud_effective_projection_mode,
     hud_enforce_agent_google_grants,
     hud_enforce_agent_role_ref,
+    hud_enforce_agent_stored_item,
     hud_enforce_agent_tool,
     hud_force_agent_google_ids,
     hud_normalize_identifier,
@@ -796,6 +797,10 @@ async def execute_hud_project_approve_reject(
     if item is None:
         return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
 
+    stored_denied = hud_enforce_agent_stored_item(request, item, route=route)
+    if stored_denied is not None:
+        return stored_denied
+
     item_status = str(item.get("status") or "").strip().lower()
     if action == "reject" and item_status in _HUD_PROJECTED_STATUSES:
         # V1 product semantics: reject only gates the queue. For an already
@@ -886,6 +891,10 @@ async def execute_hud_project_approve_reject(
 
     if item is None:
         return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
+
+    stored_denied = hud_enforce_agent_stored_item(request, item, route=route)
+    if stored_denied is not None:
+        return stored_denied
 
     if action == "approve" and hud_projection_can_dispatch(item.get("status"), projection_mode):
         adapter_projection = await hud_dispatch_projection(
@@ -1056,6 +1065,10 @@ async def execute_hud_project_retract(
     if item is None:
         return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
 
+    stored_denied = hud_enforce_agent_stored_item(request, item, route=route)
+    if stored_denied is not None:
+        return stored_denied
+
     item_status = str(item.get("status") or "").strip().lower()
     if item_status not in _HUD_PROJECTED_STATUSES:
         err = hud_error_payload(
@@ -1159,6 +1172,10 @@ async def execute_hud_project_retract(
         return hud_store_error_response(route=route, actor=actor, exc=exc)
     if item is None:
         return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
+
+    stored_denied = hud_enforce_agent_stored_item(request, item, route=route)
+    if stored_denied is not None:
+        return stored_denied
 
     retract_data = finalize_hud_data(
         {
@@ -1265,6 +1282,10 @@ async def execute_hud_project_update(
     if item is None:
         return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
 
+    stored_denied = hud_enforce_agent_stored_item(request, item, route=route)
+    if stored_denied is not None:
+        return stored_denied
+
     item_status = str(item.get("status") or "").strip().lower()
     if item_status not in _HUD_PROJECTED_STATUSES:
         err = hud_error_payload(
@@ -1339,6 +1360,10 @@ async def execute_hud_project_update(
         return hud_store_error_response(route=route, actor=actor, exc=exc)
     if item is None:
         return hud_not_found_error_response(route=route, actor=actor, item_id=item_id)
+
+    stored_denied = hud_enforce_agent_stored_item(request, item, route=route)
+    if stored_denied is not None:
+        return stored_denied
 
     # Dispatch upsert with approved status so adapters accept the write; the
     # stored external id makes Google PATCH in place (no duplicate event/task).
@@ -1491,6 +1516,9 @@ async def execute_hud_project_default(
         except Exception as exc:
             return hud_store_error_response(route=route, actor=actor, exc=exc)
         if existing_item is not None:
+            stored_denied = hud_enforce_agent_stored_item(request, existing_item, route=route)
+            if stored_denied is not None:
+                return stored_denied
             storage_payload = hud_payload_with_hud_metadata(
                 hud_storage_payload(existing_item.get("payload_json", {})),
                 classification=classification,
