@@ -981,12 +981,12 @@ def hud_onboarding_dispatch_response(
 
 
 async def handle_onboarding_soul_read(request: web.Request) -> web.Response:
-    from hud.gates import require_hud_admin
+    from hud.gates import require_hud_admin, require_hud_principal
 
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
     store: HUDStore = request.app["hud_store"]
     return hud_onboarding_soul_read_response(
         store=store,
@@ -998,12 +998,12 @@ async def handle_onboarding_soul_read(request: web.Request) -> web.Response:
 
 async def handle_onboarding_soul_write(request: web.Request) -> web.Response:
     from hud.contracts import require_json
-    from hud.gates import require_hud_admin
+    from hud.gates import require_hud_admin, require_hud_principal
 
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
     try:
         payload = require_json(await request.text())
     except ValueError as exc:
@@ -1028,12 +1028,12 @@ async def handle_onboarding_soul_write(request: web.Request) -> web.Response:
 
 async def handle_onboarding_read(request: web.Request) -> web.Response:
     """GET /hud/onboarding/read: Return current onboarding state (decomposed first-class endpoint)."""
-    from hud.gates import require_hud_admin
+    from hud.gates import require_hud_admin, require_hud_principal
 
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
     store: HUDStore = request.app["hud_store"]
     return hud_onboarding_soul_read_response(
         store=store,
@@ -1046,12 +1046,12 @@ async def handle_onboarding_read(request: web.Request) -> web.Response:
 async def handle_onboarding_write_soul(request: web.Request) -> web.Response:
     """POST /hud/onboarding/write_soul: Write soul.md markdown (decomposed first-class endpoint)."""
     from hud.contracts import require_json
-    from hud.gates import require_hud_admin
+    from hud.gates import require_hud_admin, require_hud_principal
 
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
     try:
         payload = require_json(await request.text())
     except ValueError as exc:
@@ -1080,6 +1080,7 @@ async def handle_onboarding_set_atomic(request: web.Request) -> web.Response:
     from hud.contracts import require_json
     from hud.gates import (
         require_hud_admin,
+        require_hud_principal,
         hud_resolve_user_id,
         hud_push_policy_client_fields,
     )
@@ -1091,9 +1092,9 @@ async def handle_onboarding_set_atomic(request: web.Request) -> web.Response:
     )
 
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
     try:
         payload = require_json(await request.text())
     except ValueError as exc:
@@ -1173,6 +1174,7 @@ async def handle_onboarding_set_push(request: web.Request) -> web.Response:
     from hud.contracts import require_json
     from hud.gates import (
         require_hud_admin,
+        require_hud_principal,
         hud_resolve_user_id,
         hud_parse_explicit_bool,
         hud_push_policy_client_fields,
@@ -1180,9 +1182,9 @@ async def handle_onboarding_set_push(request: web.Request) -> web.Response:
     from hud.onboarding_db import hud_onboarding_db_status, is_user_fully_onboarded
 
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
     try:
         payload = require_json(await request.text())
     except ValueError as exc:

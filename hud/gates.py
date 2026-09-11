@@ -127,6 +127,51 @@ async def require_hud_admin(request: web.Request) -> Optional[web.Response]:
     )
 
 
+def _hud_admin_principal() -> Dict[str, Any]:
+    return {"type": "admin"}
+
+
+def _hud_agent_principal(row: Mapping[str, Any]) -> Dict[str, Any]:
+    grants = row.get("grants") if isinstance(row.get("grants"), Mapping) else {}
+    principal: Dict[str, Any] = {
+        "type": "agent",
+        "agent_id": row.get("agent_id"),
+        "allowed_role_refs": list(grants.get("allowed_role_refs") or []),
+        "allowed_tools": list(grants.get("allowed_tools") or []),
+        "allowed_google_targets": list(grants.get("allowed_google_targets") or []),
+        "grants": dict(grants),
+    }
+    if grants.get("calendar_id") is not None:
+        principal["calendar_id"] = grants.get("calendar_id")
+    if grants.get("tasklist_id") is not None:
+        principal["tasklist_id"] = grants.get("tasklist_id")
+    return principal
+
+
+async def require_hud_principal(request: web.Request) -> Optional[web.Response]:
+    """Resolve admin or agent principal. Admin short-circuit is unchanged."""
+    required_key = hud_admin_key()
+    provided_admin = request.headers.get("X-HUD-Admin-Key") or request.headers.get(
+        "x-hud-admin-key"
+    )
+    if required_key and provided_admin == required_key:
+        request["hud_principal"] = _hud_admin_principal()
+        return None
+
+    provided_agent = request.headers.get("X-HUD-Agent-Key") or request.headers.get(
+        "x-hud-agent-key"
+    )
+    if provided_agent:
+        store = request.app.get("hud_store") if request.app is not None else None
+        lookup = getattr(store, "lookup_agent_by_key", None) if store is not None else None
+        row = lookup(provided_agent) if callable(lookup) else None
+        if row is not None:
+            request["hud_principal"] = _hud_agent_principal(row)
+            return None
+
+    return await require_hud_admin(request)
+
+
 def hud_agent_safe_onboarding_errors() -> bool:
     return os.environ.get("HUD_AGENT_SAFE_ONBOARDING_ERRORS", "").strip().lower() in {
         "1",

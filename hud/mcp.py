@@ -29,6 +29,7 @@ from hud.gates import (
     hud_push_policy_gate_response_if_blocked,
     hud_resolve_user_id,
     require_hud_admin,
+    require_hud_principal,
 )
 from hud.brief_context import build_classification_context
 from hud.handlers import (
@@ -72,9 +73,9 @@ _MCP_EXEMPT_PUSH_POLICY = frozenset({
 
 async def handle_mcp(request: web.Request) -> web.Response:
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
 
     store: HUDStore = request.app["hud_store"]
     workers: HUDWorkers = request.app["hud_workers"]

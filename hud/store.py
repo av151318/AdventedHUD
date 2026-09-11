@@ -825,6 +825,21 @@ class HUDStore:
         finally:
             conn.close()
 
+    def lookup_agent_by_key(self, plaintext: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(plaintext, str) or not plaintext:
+            return None
+        key_hash = self.hash_agent_key(plaintext)
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                f"SELECT agent_id, key_hash, grants_json, created_at, revoked_at FROM {_HUD_AGENT_KEYS_TABLE} "
+                "WHERE key_hash = ? AND revoked_at IS NULL",
+                (key_hash,),
+            ).fetchone()
+            return self._row_to_agent_key(row)
+        finally:
+            conn.close()
+
     def provision_agent_key(
         self,
         agent_id: str,

@@ -33,6 +33,7 @@ from hud.gates import (
     hud_push_policy_gate_response_if_blocked,
     hud_resolve_user_id,
     require_hud_admin,
+    require_hud_principal,
 )
 from hud.handlers import (
     hud_classify_project_pair,
@@ -1524,9 +1525,9 @@ async def handle_hud_ingest(request: web.Request) -> web.Response:
     from hud.gates import hud_actor
 
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
 
     store: HUDStore = request.app["hud_store"]
     workers: HUDWorkers = request.app["hud_workers"]
@@ -1580,9 +1581,9 @@ async def handle_hud_project(request: web.Request) -> web.Response:
     from hud.gates import hud_actor
 
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
 
     store: HUDStore = request.app["hud_store"]
     workers: HUDWorkers = request.app["hud_workers"]

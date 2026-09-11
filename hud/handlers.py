@@ -30,6 +30,7 @@ from hud.gates import (
     hud_push_policy_gate_response_if_blocked,
     hud_resolve_user_id,
     require_hud_admin,
+    require_hud_principal,
 )
 from hud.brief_context import build_classification_context
 from hud.onboarding import hud_soul_md_path
@@ -180,9 +181,9 @@ async def hud_adapter_sync_previews(hub: HUDAdapterHub) -> Dict[str, Any]:
 
 async def handle_sync_status(request: web.Request) -> web.Response:
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
 
     route = str(request.path)
     store: HUDStore = request.app["hud_store"]
@@ -265,9 +266,9 @@ async def handle_sync_status(request: web.Request) -> web.Response:
 
 async def handle_brief(request: web.Request) -> web.Response:
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
-        return admin_error
+    denied = await require_hud_principal(request)
+    if denied is not None:
+        return denied
 
     store: HUDStore = request.app["hud_store"]
     workers: HUDWorkers = request.app["hud_workers"]
@@ -427,8 +428,8 @@ async def handle_brief(request: web.Request) -> web.Response:
 
 async def handle_provision_agent_key(request: web.Request) -> web.Response:
     actor = hud_actor(request)
-    admin_error = await require_hud_admin(request)
-    if admin_error is not None:
+    denied = await require_hud_principal(request)
+    if denied is not None:
         agent_key = request.headers.get("X-HUD-Agent-Key") or request.headers.get(
             "x-hud-agent-key"
         )
@@ -443,7 +444,19 @@ async def handle_provision_agent_key(request: web.Request) -> web.Response:
                 ),
                 status=403,
             )
-        return admin_error
+        return denied
+    principal = request.get("hud_principal") or {}
+    if principal.get("type") != "admin":
+        return web.json_response(
+            hud_error_payload(
+                "Agent key cannot provision HUD agent keys",
+                "authorization_error",
+                "hud_agent_forbidden",
+                route=HUD_ROUTE_AGENT_KEYS,
+                actor=actor,
+            ),
+            status=403,
+        )
 
     store: HUDStore = request.app["hud_store"]
     try:
