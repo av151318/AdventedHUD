@@ -36,6 +36,7 @@ HUD_ROUTE_ONBOARDING_SET_ATOMIC = "/hud/onboarding/set_atomic"
 HUD_ROUTE_ONBOARDING_SET_PUSH = "/hud/onboarding/set_push"
 
 HUD_ROUTE_PUSH_POLICY = "/hud/push_policy"
+HUD_ROUTE_AGENT_KEYS = "/hud/agents/keys"
 
 HUD_SCOPE_TODAY = "today"
 HUD_SCOPE_WEEK = "week"

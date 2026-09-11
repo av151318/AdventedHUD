@@ -1,5 +1,7 @@
+import hashlib
 import json
 import logging
+import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -14,6 +16,7 @@ _HUD_VALID_PROJECTION_MODES = frozenset({"dry_run", "live"})
 _HUD_USER_PROJECTION_TABLE = "hud_user_projection_preferences"
 _HUD_USER_ONBOARDING_TABLE = "hud_user_onboarding_states"
 _HUD_USER_PUSH_POLICY_TABLE = "hud_user_push_policy"
+_HUD_AGENT_KEYS_TABLE = "hud_agent_keys"
 _HUD_STATUS_TRANSITIONS = {
     "pending": frozenset(
         {"queued", "approved", "rejected", "failed", "duplicate", "ready", "synced"}
@@ -163,6 +166,14 @@ class HUDStore:
             "user_id TEXT PRIMARY KEY NOT NULL,"
             "external_push INTEGER NOT NULL,"
             "updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {_HUD_AGENT_KEYS_TABLE} ("
+            "agent_id TEXT PRIMARY KEY NOT NULL,"
+            "key_hash TEXT NOT NULL,"
+            "grants_json TEXT NOT NULL,"
+            "created_at TEXT NOT NULL,"
+            "revoked_at TEXT)"
         )
 
     def _init_db(self) -> None:
@@ -764,6 +775,87 @@ class HUDStore:
             return cursor.rowcount > 0
         finally:
             conn.close()
+
+    @staticmethod
+    def hash_agent_key(plaintext: str) -> str:
+        return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _normalize_agent_grants(grants: Mapping[str, Any], *, agent_id: str) -> Dict[str, Any]:
+        allowed_role_refs = list(grants.get("allowed_role_refs") or [])
+        allowed_tools = list(grants.get("allowed_tools") or [])
+        allowed_google_targets = list(grants.get("allowed_google_targets") or [])
+        normalized: Dict[str, Any] = {
+            "agent_id": agent_id,
+            "allowed_role_refs": [str(v) for v in allowed_role_refs],
+            "allowed_tools": [str(v) for v in allowed_tools],
+            "allowed_google_targets": [str(v) for v in allowed_google_targets],
+        }
+        if grants.get("calendar_id") is not None:
+            normalized["calendar_id"] = str(grants.get("calendar_id"))
+        if grants.get("tasklist_id") is not None:
+            normalized["tasklist_id"] = str(grants.get("tasklist_id"))
+        return normalized
+
+    def _row_to_agent_key(self, row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+        if row is None:
+            return None
+        grants: Any = row["grants_json"]
+        try:
+            grants = json.loads(grants) if grants is not None else {}
+        except (TypeError, json.JSONDecodeError):
+            logger.warning("Invalid stored grants_json for agent_id=%s", row["agent_id"])
+            grants = {}
+        return {
+            "agent_id": row["agent_id"],
+            "key_hash": row["key_hash"],
+            "grants": grants,
+            "created_at": row["created_at"],
+            "revoked_at": row["revoked_at"],
+        }
+
+    def get_agent_key(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                f"SELECT agent_id, key_hash, grants_json, created_at, revoked_at FROM {_HUD_AGENT_KEYS_TABLE} WHERE agent_id = ?",
+                (agent_id,),
+            ).fetchone()
+            return self._row_to_agent_key(row)
+        finally:
+            conn.close()
+
+    def provision_agent_key(
+        self,
+        agent_id: str,
+        grants: Mapping[str, Any],
+        *,
+        plaintext: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        agent_id = str(agent_id).strip()
+        if not agent_id:
+            raise ValueError("agent_id is required")
+        secret = plaintext if plaintext else secrets.token_urlsafe(32)
+        key_hash = self.hash_agent_key(secret)
+        normalized = self._normalize_agent_grants(grants, agent_id=agent_id)
+        grants_json = json.dumps(normalized, separators=(",", ":"), ensure_ascii=False)
+        now = self._now_iso()
+        conn = self._connect()
+        try:
+            conn.execute(
+                f"INSERT INTO {_HUD_AGENT_KEYS_TABLE} (agent_id, key_hash, grants_json, created_at, revoked_at) "
+                "VALUES (?, ?, ?, ?, NULL)",
+                (agent_id, key_hash, grants_json, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return {
+            "agent_id": agent_id,
+            "key": secret,
+            "grants": normalized,
+            "created_at": now,
+        }
 
     def mark_duplicate(self, idempotency_key: str, fallback_internal_id: str) -> bool:
         conn = self._connect()

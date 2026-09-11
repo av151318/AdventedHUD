@@ -12,6 +12,7 @@ from hud.adapters import HUDAdapterHub
 from hud.contracts import (
     HUD_ERROR_HTTP_STATUS,
     HUD_INTENT_BRIEF,
+    HUD_ROUTE_AGENT_KEYS,
     HUD_ROUTE_BRIEF,
     hud_error_payload,
     hud_success_payload,
@@ -424,5 +425,93 @@ async def handle_brief(request: web.Request) -> web.Response:
     )
 
 
+async def handle_provision_agent_key(request: web.Request) -> web.Response:
+    actor = hud_actor(request)
+    admin_error = await require_hud_admin(request)
+    if admin_error is not None:
+        agent_key = request.headers.get("X-HUD-Agent-Key") or request.headers.get(
+            "x-hud-agent-key"
+        )
+        if agent_key:
+            return web.json_response(
+                hud_error_payload(
+                    "Agent key cannot provision HUD agent keys",
+                    "authorization_error",
+                    "hud_agent_forbidden",
+                    route=HUD_ROUTE_AGENT_KEYS,
+                    actor=actor,
+                ),
+                status=403,
+            )
+        return admin_error
+
+    store: HUDStore = request.app["hud_store"]
+    try:
+        payload = require_json(await request.text())
+    except ValueError as exc:
+        return web.json_response(
+            hud_error_payload(
+                str(exc),
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_AGENT_KEYS,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+
+    agent_id = payload.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id.strip():
+        return web.json_response(
+            hud_error_payload(
+                "agent_id is required",
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_AGENT_KEYS,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+    agent_id = agent_id.strip()
+
+    try:
+        minted = store.provision_agent_key(agent_id, payload)
+    except sqlite3.IntegrityError:
+        return web.json_response(
+            hud_error_payload(
+                "agent_id already exists",
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_AGENT_KEYS,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+    except ValueError as exc:
+        return web.json_response(
+            hud_error_payload(
+                str(exc),
+                "validation_error",
+                "invalid_payload",
+                route=HUD_ROUTE_AGENT_KEYS,
+                actor=actor,
+            ),
+            status=HUD_ERROR_HTTP_STATUS["invalid_payload"],
+        )
+
+    return web.json_response(
+        hud_success_payload(
+            HUD_ROUTE_AGENT_KEYS,
+            data={
+                "agent_id": minted["agent_id"],
+                "key": minted["key"],
+                "grants": minted["grants"],
+            },
+            actor=actor,
+        )
+    )
+
+
 async def handle_health(_request: web.Request) -> web.Response:
+
     return web.json_response({"status": "ok", "service": "AdventedHUD"}, status=200)

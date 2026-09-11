@@ -9,6 +9,7 @@ from aiohttp import web
 
 from hud.adapters import HUDAdapterHub
 from hud.contracts import (
+    HUD_ROUTE_AGENT_KEYS,
     HUD_ROUTE_BRIEF,
     HUD_ROUTE_INGEST,
     HUD_ROUTE_MCP,
@@ -21,7 +22,7 @@ from hud.contracts import (
     HUD_ROUTE_STATUS_COMPAT,
     HUD_ROUTE_SYNC_STATUS,
 )
-from hud.handlers import handle_brief, handle_health, handle_sync_status
+from hud.handlers import handle_brief, handle_health, handle_provision_agent_key, handle_sync_status
 from hud.ingest_project import handle_hud_ingest, handle_hud_project
 from hud.mcp import handle_mcp
 from hud.onboarding import handle_onboarding_soul_read, handle_onboarding_soul_write, handle_onboarding_read, handle_onboarding_write_soul, handle_onboarding_set_atomic, handle_onboarding_set_push
@@ -59,6 +60,7 @@ def create_app() -> web.Application:
     app.router.add_post(HUD_ROUTE_BRIEF, handle_brief)
     app.router.add_post(HUD_ROUTE_INGEST, handle_hud_ingest)
     app.router.add_post(HUD_ROUTE_PROJECT, handle_hud_project)
+    app.router.add_post(HUD_ROUTE_AGENT_KEYS, handle_provision_agent_key)
     app.router.add_post(HUD_ROUTE_MCP, handle_mcp)
     app.router.add_get(HUD_ROUTE_ONBOARDING_SOUL, handle_onboarding_soul_read)
     app.router.add_post(HUD_ROUTE_ONBOARDING_SOUL, handle_onboarding_soul_write)
